@@ -18,9 +18,7 @@
 файла, а получить именно multi-process сценарий, как того требуют главы
 14-17, всё равно удалось.
 
-Единственная оговорка про заголовки (тот же случай, что в task2.md): кроме
-windows.h и iostream.h понадобился ещё stdlib.h - ради atoi() при разборе
-чисел из командной строки (обычный C, не Win32-специфика).
+Сборка и заголовки: проект Visual Studio с настройкой по умолчанию - Юникод (UNICODE), поэтому весь текст в программе - широкие строки (wchar_t, литералы L"...", точка входа wmain, вывод через wcout), а файл сохраняется в UTF-8 с BOM, иначе кириллица в литералах портится. Кроме windows.h и iostream понадобились stdlib.h (_wtoi - разбор числа из командной строки), io.h и fcntl.h (_setmode - чтобы wcout выводил кириллицу).
 
 Код
 
@@ -75,28 +73,37 @@ windows.h и iostream.h понадобился ещё stdlib.h - ради atoi()
 //      подтверждается. По природе - домен, здесь один компьютер. Адресация:
 //      косвенная, по имени ящика.
 //
-//  Единственная оговорка про заголовки (тот же случай, что в task2.md):
-//  кроме windows.h и iostream.h понадобился ещё stdlib.h - ради atoi() при
-//  разборе аргументов командной строки (обычный C, не Win32-специфика).
+//  Сборка: Visual Studio, консольное приложение, Юникод (UNICODE/_UNICODE -
+//  настройка проекта по умолчанию), C++14 и новее. Весь текст - широкие
+//  строки (wchar_t, литералы L"..."), точка входа - wmain. Файл сохранён
+//  в UTF-8 с BOM, чтобы кириллица в литералах читалась правильно. Через
+//  каналы и почтовый ящик передаётся UTF-16, поэтому размеры в
+//  WriteFile/ReadFile считаются в байтах: число символов * sizeof(wchar_t).
 //
-//  Не скомпилировано по-настоящему (нет Windows/MSVC в этом окружении) -
-//  проверено по документации и логике API, каждая сигнатура сверена
-//  построчно с lectures/09-17 и reference/09-17.
+//  Дополнительные заголовки: stdlib.h (_wtoi - разбор числовых аргументов
+//  командной строки), io.h и fcntl.h (_setmode - чтобы wcout выводил
+//  кириллицу в консоль). Это обычная библиотека C/C++, не Win32-специфика.
+//
+//  Проверено: собрано MSVC (Visual Studio 2026, x64) без ошибок и
+//  предупреждений, запущено - все три канала работают (датчик, отделение,
+//  три банкомата), диспетчер корректно закрывается.//
 // ============================================================================
 
 #include <windows.h>
 #include <iostream>
-#include <stdlib>   // atoi() - см. оговорку выше
-usign namespace std;
+#include <stdlib.h>   // _wtoi()
+#include <io.h>       // _setmode
+#include <fcntl.h>    // _O_U16TEXT
+using namespace std;
 
 // ---------- Имена каналов ----------
 
-#define BRANCH_PIPE_NAME   "\\\\.\\pipe\\Bank_Iris_BranchPipe"
-#define ATM_MAILSLOT_NAME  "\\\\.\\mailslot\\Bank_Iris_ATMAlerts"
+#define BRANCH_PIPE_NAME   L"\\\\.\\pipe\\Bank_Iris_BranchPipe"
+#define ATM_MAILSLOT_NAME  L"\\\\.\\mailslot\\Bank_Iris_ATMAlerts"
 
 // ---------- Размеры и раскладка дашборда (глава 11, 12) ----------
 
-const int ATM_COUNT      = 3;    // сколько банкоматов в сегменте сети
+const int ATM_COUNT = 3;    // сколько банкоматов в сегменте сети
 const int AGENT_READINGS = 8;    // сколько показаний пришлёт датчик нагрузки
 
 const int BUF_COLS = 100;   // ширина буфера экрана диспетчера (холст)
@@ -104,11 +111,11 @@ const int BUF_ROWS = 40;    // высота буфера экрана
 const int WIN_COLS = 90;    // ширина ОКНА - меньше буфера (11: окно <= буфера)
 const int WIN_ROWS = 25;
 
-const int ROW_TITLE  = 0;
-const int ROW_BOARD  = 3;          // строка табло банкоматов
-const int ROW_LOAD   = 5;          // строка датчика нагрузки диспетчерской
-const int ROW_HINT   = BUF_ROWS - 1;
-const int LOG_TOP    = 7;          // первая строка прокручиваемого журнала
+const int ROW_TITLE = 0;
+const int ROW_BOARD = 3;          // строка табло банкоматов
+const int ROW_LOAD = 5;          // строка датчика нагрузки диспетчерской
+const int ROW_HINT = BUF_ROWS - 1;
+const int LOG_TOP = 7;          // первая строка прокручиваемого журнала
 const int LOG_BOTTOM = BUF_ROWS - 3;
 
 const int CELL_WIDTH = 14;   // ширина одной клетки табло банкомата
@@ -123,19 +130,19 @@ HANDLE           g_hAgentRead;   // дескриптор ЧТЕНИЯ анони
 HANDLE           g_hMailslot;    // дескриптор почтового ящика (сервер)
 
 int  g_logRow = LOG_TOP;         // следующая свободная строка журнала
-char g_exePath[MAX_PATH];        // путь к собственному exe (для самозапуска)
+wchar_t g_exePath[MAX_PATH];        // путь к собственному exe (для самозапуска)
 
 struct AtmCell
 {
     int  state;          // 0 - нет данных, 1 - в норме, 2 - тревога
-    char lastMsg[64];    // текст последнего сообщения от банкомата
+    wchar_t lastMsg[64];    // текст последнего сообщения от банкомата
 };
 AtmCell g_atm[ATM_COUNT];
 
 DWORD g_agentLoad = 0;    // последнее показание датчика нагрузки (глава 15)
 
 // Данные, которые agent передаёт диспетчеру потоком байтов через
-// анонимный канал - сырая структура, а не текст (контраст с cout,
+// анонимный канал - сырая структура, а не текст (контраст с wcout,
 // про который прямо предупреждает глава 15: формат чтения должен
 // совпадать с форматом записи).
 struct SensorReading
@@ -150,7 +157,7 @@ struct SensorReading
 
 // Текст ошибки Win32 для ролей с ОБЫЧНОЙ консолью (branch, atm) - тот же
 // приём, что PrintLastError в task2.md (тема 3.6, CoutErrorMessage).
-void PrintLastError(const char* what)
+void PrintLastError(const wchar_t* what)
 {
     DWORD  err = GetLastError();
     LPVOID lpMsgBuf;
@@ -161,7 +168,7 @@ void PrintLastError(const char* what)
         NULL, err, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
         (LPTSTR)&lpMsgBuf, 0, NULL);
 
-    cout << "[ОШИБКА] " << what << " (код " << err << "): " << (char*)lpMsgBuf << endl;
+    wcout << L"[ОШИБКА] " << what << L" (код " << err << L"): " << (wchar_t*)lpMsgBuf << endl;
 
     LocalFree(lpMsgBuf);
 }
@@ -175,8 +182,8 @@ void BuildExePath()
 {
     if (GetModuleFileName(NULL, g_exePath, MAX_PATH) == 0)
     {
-        PrintLastError("GetModuleFileName");
-        lstrcpy(g_exePath, "dispatcher.exe");   // крайний случай, не должен случиться
+        PrintLastError(L"GetModuleFileName");
+        lstrcpy(g_exePath, L"dispatcher.exe");   // крайний случай, не должен случиться
     }
 }
 
@@ -202,11 +209,11 @@ void ScrollLogUp()
     coordDest.X = 0; coordDest.Y = (SHORT)LOG_TOP;
 
     CHAR_INFO fill;
-    fill.Char.AsciiChar = ' ';
-    fill.Attributes     = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE;
+    fill.Char.UnicodeChar = L' ';
+    fill.Attributes = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE;
 
     if (!ScrollConsoleScreenBuffer(g_hStdOut, &srScroll, &srClip, coordDest, &fill))
-        PrintLastError("ScrollConsoleScreenBuffer");
+        PrintLastError(L"ScrollConsoleScreenBuffer");
 }
 
 // Строка журнала: источник события + сам текст. Пишется через
@@ -214,12 +221,12 @@ void ScrollLogUp()
 // журнала заполнена. Единственная точка вывода дашборда, защищённая
 // критической секцией - без неё три потока-читателя каналов (глава 15-17)
 // писали бы в консоль одновременно и портили бы друг другу строки.
-void Log(const char* src, const char* msg)
+void Log(const wchar_t* src, const wchar_t* msg)
 {
     EnterCriticalSection(&g_csLog);
 
-    char line[BUF_COLS + 1];
-    wsprintf(line, "[%-9s] %s", src, msg);
+    wchar_t line[BUF_COLS + 1];
+    wsprintf(line, L"[%-9s] %s", src, msg);
 
     if (g_logRow > LOG_BOTTOM)
     {
@@ -253,27 +260,27 @@ void DrawAtmCell(int index)
     coord.X = (SHORT)(index * CELL_WIDTH); coord.Y = (SHORT)ROW_BOARD;
 
     WORD attr;
-    const char* mark;
+    const wchar_t* mark;
     switch (g_atm[index].state)
     {
     case 2:
         attr = BACKGROUND_RED | BACKGROUND_INTENSITY |
-               FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY;
-        mark = "!!!";
+            FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY;
+        mark = L"!!!";
         break;
     case 1:
         attr = BACKGROUND_GREEN |
-               FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY;
-        mark = "ok";
+            FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY;
+        mark = L"ok";
         break;
     default:
         attr = BACKGROUND_BLUE | FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE;
-        mark = "...";
+        mark = L"...";
         break;
     }
 
-    char label[CELL_WIDTH + 1];
-    wsprintf(label, " ATM %-2d %-4s", index + 1, mark);
+    wchar_t label[CELL_WIDTH + 1];
+    wsprintf(label, L" ATM %-2d %-4s", index + 1, mark);
 
     DWORD written;
     FillConsoleOutputAttribute(g_hStdOut, attr, CELL_WIDTH, coord, &written);
@@ -288,8 +295,8 @@ void DrawAllAtmCells()
 
 void DrawLoad()
 {
-    char  line[64];
-    wsprintf(line, "Нагрузка диспетчерской: %d%%       ", g_agentLoad);
+    wchar_t  line[64];
+    wsprintf(line, L"Нагрузка диспетчерской: %d%%       ", g_agentLoad);
 
     COORD coord;
     coord.X = 0; coord.Y = (SHORT)ROW_LOAD;
@@ -309,7 +316,7 @@ void ShowSplash()
         GENERIC_READ | GENERIC_WRITE, 0, NULL, CONSOLE_TEXTMODE_BUFFER, NULL);
     if (hSplash == INVALID_HANDLE_VALUE)
     {
-        PrintLastError("CreateConsoleScreenBuffer (заставка)");
+        PrintLastError(L"CreateConsoleScreenBuffer (заставка)");
         return;
     }
 
@@ -321,27 +328,27 @@ void ShowSplash()
     COORD coord;
 
     coord.X = 2; coord.Y = 2;
-    char title1[] = "БАНК \"ЫРЫС\"";
+    wchar_t title1[] = L"БАНК \"ЫРЫС\"";
     SetConsoleCursorPosition(hSplash, coord);
     WriteConsole(hSplash, title1, lstrlen(title1), &written, NULL);
 
     coord.X = 2; coord.Y = 4;
-    char title2[] = "Диспетчерская мониторинга банкоматов";
+    wchar_t title2[] = L"Диспетчерская мониторинга банкоматов";
     SetConsoleCursorPosition(hSplash, coord);
     WriteConsole(hSplash, title2, lstrlen(title2), &written, NULL);
 
     coord.X = 2; coord.Y = 6;
-    char title3[] = "Поднимаю каналы связи...";
+    wchar_t title3[] = L"Поднимаю каналы связи...";
     SetConsoleCursorPosition(hSplash, coord);
     WriteConsole(hSplash, title3, lstrlen(title3), &written, NULL);
 
     if (!SetConsoleActiveScreenBuffer(hSplash))
-        PrintLastError("SetConsoleActiveScreenBuffer (заставка)");
+        PrintLastError(L"SetConsoleActiveScreenBuffer (заставка)");
 
     Sleep(1200);
 
     if (!SetConsoleActiveScreenBuffer(g_hStdOut))
-        PrintLastError("SetConsoleActiveScreenBuffer (возврат к дашборду)");
+        PrintLastError(L"SetConsoleActiveScreenBuffer (возврат к дашборду)");
 
     CloseHandle(hSplash);
 }
@@ -352,14 +359,14 @@ void ShowSplash()
 
 BOOL SetupDispatcherConsole()
 {
-    if (!SetConsoleTitle("Банк \"Ырыс\" - Диспетчерская мониторинга"))
-        PrintLastError("SetConsoleTitle");
+    if (!SetConsoleTitle(L"Банк \"Ырыс\" - Диспетчерская мониторинга"))
+        PrintLastError(L"SetConsoleTitle");
 
     g_hStdOut = GetStdHandle(STD_OUTPUT_HANDLE);
-    g_hStdIn  = GetStdHandle(STD_INPUT_HANDLE);
+    g_hStdIn = GetStdHandle(STD_INPUT_HANDLE);
     if (g_hStdOut == INVALID_HANDLE_VALUE || g_hStdIn == INVALID_HANDLE_VALUE)
     {
-        PrintLastError("GetStdHandle");
+        PrintLastError(L"GetStdHandle");
         return FALSE;
     }
 
@@ -368,42 +375,42 @@ BOOL SetupDispatcherConsole()
     COORD bufSize;
     bufSize.X = (SHORT)BUF_COLS; bufSize.Y = (SHORT)BUF_ROWS;
     if (!SetConsoleScreenBufferSize(g_hStdOut, bufSize))
-        PrintLastError("SetConsoleScreenBufferSize");
+        PrintLastError(L"SetConsoleScreenBufferSize");
 
     SMALL_RECT winRect;
     winRect.Left = 0; winRect.Top = 0;
     winRect.Right = (SHORT)(WIN_COLS - 1); winRect.Bottom = (SHORT)(WIN_ROWS - 1);
     if (!SetConsoleWindowInfo(g_hStdOut, TRUE, &winRect))
-        PrintLastError("SetConsoleWindowInfo");
+        PrintLastError(L"SetConsoleWindowInfo");
 
     // Остальная часть главы 11: узнаём максимально возможный размер окна
     // и читаем заголовок обратно, чтобы убедиться, что он правда встал.
     COORD maxWin = GetLargestConsoleWindowSize(g_hStdOut);
     if (maxWin.X == 0 && maxWin.Y == 0)
-        PrintLastError("GetLargestConsoleWindowSize");
+        PrintLastError(L"GetLargestConsoleWindowSize");
     else if (maxWin.X < WIN_COLS || maxWin.Y < WIN_ROWS)
-        Log("СИСТЕМА", "экран мельче, чем нужно дашборду - часть текста может не влезть");
+        Log(L"СИСТЕМА", L"экран мельче, чем нужно дашборду - часть текста может не влезть");
 
-    char  titleBuf[128];
-    DWORD titleLen = GetConsoleTitle(titleBuf, sizeof(titleBuf));
+    wchar_t  titleBuf[128];
+    DWORD titleLen = GetConsoleTitle(titleBuf, _countof(titleBuf));
     if (titleLen == 0)
-        PrintLastError("GetConsoleTitle");
+        PrintLastError(L"GetConsoleTitle");
 
     HWND hWnd = GetConsoleWindow();
     if (hWnd == NULL)
-        Log("СИСТЕМА", "GetConsoleWindow не нашёл окно (нужны Windows 2000/XP)");
+        Log(L"СИСТЕМА", L"GetConsoleWindow не нашёл окно (нужны Windows 2000/XP)");
 
     CONSOLE_CURSOR_INFO cci;
-    cci.dwSize   = 25;
+    cci.dwSize = 25;
     cci.bVisible = TRUE;
     if (!SetConsoleCursorInfo(g_hStdOut, &cci))
-        PrintLastError("SetConsoleCursorInfo");
+        PrintLastError(L"SetConsoleCursorInfo");
 
     // Низкоуровневый ввод: без построчного режима и без эха - события
     // разбираем сами через ReadConsoleInput; окно и мышь - тоже приложению.
     DWORD dwMode;
     if (!GetConsoleMode(g_hStdIn, &dwMode))
-        PrintLastError("GetConsoleMode");
+        PrintLastError(L"GetConsoleMode");
     dwMode &= ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT);
     dwMode |= ENABLE_WINDOW_INPUT | ENABLE_MOUSE_INPUT;
     // ENABLE_QUICK_EDIT_MODE и ENABLE_EXTENDED_FLAGS не описаны в этой
@@ -413,7 +420,7 @@ BOOL SetupDispatcherConsole()
     dwMode |= ENABLE_EXTENDED_FLAGS;
     dwMode &= ~ENABLE_QUICK_EDIT_MODE;
     if (!SetConsoleMode(g_hStdIn, dwMode))
-        PrintLastError("SetConsoleMode");
+        PrintLastError(L"SetConsoleMode");
 
     return TRUE;
 }
@@ -425,11 +432,11 @@ void DrawDashboardChrome()
     zero.X = 0; zero.Y = (SHORT)ROW_TITLE;
 
     WORD titleAttr = BACKGROUND_BLUE | BACKGROUND_INTENSITY |
-                      FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY;
+        FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY;
     FillConsoleOutputAttribute(g_hStdOut, titleAttr, BUF_COLS, zero, &written);
     SetConsoleTextAttribute(g_hStdOut, titleAttr);
 
-    char title[] = " БАНК \"ЫРЫС\" - ДИСПЕТЧЕРСКАЯ МОНИТОРИНГА ";
+    wchar_t title[] = L" БАНК \"ЫРЫС\" - ДИСПЕТЧЕРСКАЯ МОНИТОРИНГА ";
     SetConsoleCursorPosition(g_hStdOut, zero);
     WriteConsole(g_hStdOut, title, lstrlen(title), &written, NULL);
 
@@ -437,7 +444,7 @@ void DrawDashboardChrome()
 
     COORD c;
     c.X = 0; c.Y = 2;
-    char boardLabel[] = "Табло банкоматов:";
+    wchar_t boardLabel[] = L"Табло банкоматов:";
     SetConsoleCursorPosition(g_hStdOut, c);
     WriteConsole(g_hStdOut, boardLabel, lstrlen(boardLabel), &written, NULL);
 
@@ -445,12 +452,12 @@ void DrawDashboardChrome()
     DrawLoad();
 
     c.X = 0; c.Y = (SHORT)(LOG_TOP - 1);
-    char logLabel[] = "Журнал событий:";
+    wchar_t logLabel[] = L"Журнал событий:";
     SetConsoleCursorPosition(g_hStdOut, c);
     WriteConsole(g_hStdOut, logLabel, lstrlen(logLabel), &written, NULL);
 
     c.X = 0; c.Y = (SHORT)ROW_HINT;
-    char hint[] = "Q-выход  C-очистить журнал  ЛКМ по табло-подробности о банкомате";
+    wchar_t hint[] = L"Q-выход  C-очистить журнал  ЛКМ по табло-подробности о банкомате";
     SetConsoleCursorPosition(g_hStdOut, c);
     WriteConsole(g_hStdOut, hint, lstrlen(hint), &written, NULL);
 }
@@ -469,22 +476,22 @@ BOOL SpawnAgent()
 
     if (!CreatePipe(&hRead, &hWrite, NULL, 0))
     {
-        PrintLastError("CreatePipe (agent)");
+        PrintLastError(L"CreatePipe (agent)");
         return FALSE;
     }
     g_hAgentRead = hRead;   // остаётся ненаследуемым - виден только диспетчеру
 
     if (!DuplicateHandle(GetCurrentProcess(), hWrite, GetCurrentProcess(),
-                          &hInheritWrite, 0, TRUE, DUPLICATE_SAME_ACCESS))
+        &hInheritWrite, 0, TRUE, DUPLICATE_SAME_ACCESS))
     {
-        PrintLastError("DuplicateHandle (agent write)");
+        PrintLastError(L"DuplicateHandle (agent write)");
         CloseHandle(hWrite);
         return FALSE;
     }
     CloseHandle(hWrite);   // ненаследуемый оригинал больше не нужен
 
-    char cmdLine[MAX_PATH + 32];
-    wsprintf(cmdLine, "\"%s\" agent %d", g_exePath, (int)hInheritWrite);
+    wchar_t cmdLine[MAX_PATH + 32];
+    wsprintf(cmdLine, L"\"%s\" agent %u", g_exePath, (unsigned)(UINT_PTR)hInheritWrite);
 
     STARTUPINFO         si;
     PROCESS_INFORMATION pi;
@@ -494,9 +501,9 @@ BOOL SpawnAgent()
     // DETACHED_PROCESS (глава 10): у датчика нет и не будет собственной
     // консоли - она ему не нужна, он только пишет в канал и завершается.
     if (!CreateProcess(NULL, cmdLine, NULL, NULL, TRUE,
-                        DETACHED_PROCESS, NULL, NULL, &si, &pi))
+        DETACHED_PROCESS, NULL, NULL, &si, &pi))
     {
-        PrintLastError("CreateProcess (agent)");
+        PrintLastError(L"CreateProcess (agent)");
         CloseHandle(hInheritWrite);
         return FALSE;
     }
@@ -526,9 +533,9 @@ DWORD WINAPI AgentReaderThread(LPVOID)
         DrawLoad();
         LeaveCriticalSection(&g_csLog);
 
-        char msg[64];
-        wsprintf(msg, "показание: нагрузка %d%% (тик %u)", r.load, r.tick);
-        Log("ДАТЧИК", msg);
+        wchar_t msg[64];
+        wsprintf(msg, L"показание: нагрузка %d%% (тик %u)", r.load, r.tick);
+        Log(L"ДАТЧИК", msg);
     }
 
     return 0;
@@ -540,8 +547,8 @@ DWORD WINAPI AgentReaderThread(LPVOID)
 
 BOOL SpawnBranch()
 {
-    char cmdLine[MAX_PATH + 16];
-    wsprintf(cmdLine, "\"%s\" branch", g_exePath);
+    wchar_t cmdLine[MAX_PATH + 16];
+    wsprintf(cmdLine, L"\"%s\" branch", g_exePath);
 
     STARTUPINFO         si;
     PROCESS_INFORMATION pi;
@@ -556,7 +563,7 @@ BOOL SpawnBranch()
     // atm (совсем новая консоль) ниже.
     if (!CreateProcess(NULL, cmdLine, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
     {
-        PrintLastError("CreateProcess (branch)");
+        PrintLastError(L"CreateProcess (branch)");
         return FALSE;
     }
     CloseHandle(pi.hThread);
@@ -580,14 +587,14 @@ DWORD WINAPI NamedPipeServerThread(LPVOID)
 
     if (h == INVALID_HANDLE_VALUE)
     {
-        PrintLastError("CreateNamedPipe");
+        PrintLastError(L"CreateNamedPipe");
         return 1;
     }
 
     BOOL connected = ConnectNamedPipe(h, NULL);
     if (!connected && GetLastError() != ERROR_PIPE_CONNECTED)
     {
-        PrintLastError("ConnectNamedPipe");
+        PrintLastError(L"ConnectNamedPipe");
         CloseHandle(h);
         return 1;
     }
@@ -595,37 +602,37 @@ DWORD WINAPI NamedPipeServerThread(LPVOID)
     DWORD lpFlags, outSize, inSize, maxInst;
     if (GetNamedPipeInfo(h, &lpFlags, &outSize, &inSize, &maxInst))
     {
-        char msg[96];
-        wsprintf(msg, "отделение подключилось (буферы %d/%d байт, экземпляров max %d)",
-                 outSize, inSize, maxInst);
-        Log("ФИЛИАЛ", msg);
+        wchar_t msg[96];
+        wsprintf(msg, L"отделение подключилось (буферы %d/%d байт, экземпляров max %d)",
+            outSize, inSize, maxInst);
+        Log(L"ФИЛИАЛ", msg);
     }
     else
     {
-        PrintLastError("GetNamedPipeInfo");
+        PrintLastError(L"GetNamedPipeInfo");
     }
 
-    char  buf[256];
+    wchar_t  buf[256];
     DWORD n;
-    if (ReadFile(h, buf, sizeof(buf) - 1, &n, NULL))
+    if (ReadFile(h, buf, sizeof(buf) - sizeof(wchar_t), &n, NULL))
     {
-        buf[n] = '\0';
-        Log("ФИЛИАЛ", buf);
+        buf[n / sizeof(wchar_t)] = L'\0';
+        Log(L"ФИЛИАЛ", buf);
 
-        char reply[] = "Диспетчер: отчёт принят, отделение на связи.";
-        if (!WriteFile(h, reply, lstrlen(reply) + 1, &n, NULL))
-            PrintLastError("WriteFile (ответ отделению)");
+        wchar_t reply[] = L"Диспетчер: отчёт принят, отделение на связи.";
+        if (!WriteFile(h, reply, (lstrlen(reply) + 1) * sizeof(wchar_t), &n, NULL))
+            PrintLastError(L"WriteFile (ответ отделению)");
     }
     else
     {
-        PrintLastError("ReadFile (branch pipe)");
+        PrintLastError(L"ReadFile (branch pipe)");
     }
 
     if (!DisconnectNamedPipe(h))
-        PrintLastError("DisconnectNamedPipe");
+        PrintLastError(L"DisconnectNamedPipe");
     CloseHandle(h);
 
-    Log("ФИЛИАЛ", "сеанс завершён, канал закрыт");
+    Log(L"ФИЛИАЛ", L"сеанс завершён, канал закрыт");
     return 0;
 }
 
@@ -638,7 +645,7 @@ BOOL CreateAtmMailslot()
     g_hMailslot = CreateMailslot(ATM_MAILSLOT_NAME, 0, 200, NULL);
     if (g_hMailslot == INVALID_HANDLE_VALUE)
     {
-        PrintLastError("CreateMailslot");
+        PrintLastError(L"CreateMailslot");
         return FALSE;
     }
     return TRUE;
@@ -646,11 +653,11 @@ BOOL CreateAtmMailslot()
 
 BOOL SpawnAtm(int id, int posX, int posY)
 {
-    char cmdLine[MAX_PATH + 16];
-    wsprintf(cmdLine, "\"%s\" atm %d", g_exePath, id);
+    wchar_t cmdLine[MAX_PATH + 16];
+    wsprintf(cmdLine, L"\"%s\" atm %d", g_exePath, id);
 
-    char title[32];
-    wsprintf(title, "Банкомат №%d", id);
+    wchar_t title[32];
+    wsprintf(title, L"Банкомат №%d", id);
 
     STARTUPINFO         si;
     PROCESS_INFORMATION pi;
@@ -660,22 +667,22 @@ BOOL SpawnAtm(int id, int posX, int posY)
     // Собственная, отдельная консоль с заданными положением/размером/
     // заголовком/цветом (глава 10) - каждое поле учитывается ТОЛЬКО при
     // поднятом соответствующем флаге в dwFlags, отсюда столько флагов.
-    si.lpTitle         = title;
-    si.dwX             = posX;
-    si.dwY             = posY;
-    si.dwXSize         = 320;
-    si.dwYSize         = 160;
-    si.dwXCountChars   = 50;
-    si.dwYCountChars   = 10;
+    si.lpTitle = title;
+    si.dwX = posX;
+    si.dwY = posY;
+    si.dwXSize = 320;
+    si.dwYSize = 160;
+    si.dwXCountChars = 50;
+    si.dwYCountChars = 10;
     si.dwFillAttribute = FOREGROUND_GREEN | FOREGROUND_INTENSITY;
-    si.wShowWindow     = SW_SHOWNORMAL;
+    si.wShowWindow = SW_SHOWNORMAL;
     si.dwFlags = STARTF_USEPOSITION | STARTF_USESIZE | STARTF_USECOUNTCHARS |
-                 STARTF_USEFILLATTRIBUTE | STARTF_USESHOWWINDOW;
+        STARTF_USEFILLATTRIBUTE | STARTF_USESHOWWINDOW;
 
     if (!CreateProcess(NULL, cmdLine, NULL, NULL, FALSE,
-                        CREATE_NEW_CONSOLE, NULL, NULL, &si, &pi))
+        CREATE_NEW_CONSOLE, NULL, NULL, &si, &pi))
     {
-        PrintLastError("CreateProcess (atm)");
+        PrintLastError(L"CreateProcess (atm)");
         return FALSE;
     }
     CloseHandle(pi.hThread);
@@ -699,22 +706,22 @@ DWORD WINAPI MailslotServerThread(LPVOID)
 
         while (count != 0 && nextSize != MAILSLOT_NO_MESSAGE)
         {
-            char* p = new char[nextSize + 1];
+            wchar_t* p = new wchar_t[nextSize / sizeof(wchar_t) + 1];
             DWORD n;
             if (ReadFile(g_hMailslot, p, nextSize, &n, NULL))
             {
-                p[n] = '\0';
-                Log("АТМ", p);
+                p[n / sizeof(wchar_t)] = L'\0';
+                Log(L"АТМ", p);
 
                 // Свой же формат сообщения "ATM<id>:текст" - разбираем,
                 // чтобы понять, какую клетку табло перекрасить и как.
                 if (p[0] == 'A' && p[1] == 'T' && p[2] == 'M')
                 {
-                    int id = atoi(p + 3);
+                    int id = _wtoi(p + 3);
                     if (id >= 1 && id <= ATM_COUNT)
                     {
                         EnterCriticalSection(&g_csLog);
-                        lstrcpyn(g_atm[id - 1].lastMsg, p, sizeof(g_atm[id - 1].lastMsg));
+                        lstrcpyn(g_atm[id - 1].lastMsg, p, _countof(g_atm[id - 1].lastMsg));
                         int len = lstrlen(p);
                         g_atm[id - 1].state = (len > 0 && p[len - 1] == '!') ? 2 : 1;
                         DrawAtmCell(id - 1);
@@ -745,7 +752,7 @@ int RunDispatcherRole()
     g_hQuitEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
     if (g_hQuitEvent == NULL)
     {
-        PrintLastError("CreateEvent");
+        PrintLastError(L"CreateEvent");
         return 1;
     }
 
@@ -757,25 +764,25 @@ int RunDispatcherRole()
     for (int i = 0; i < ATM_COUNT; ++i)
     {
         g_atm[i].state = 0;
-        lstrcpy(g_atm[i].lastMsg, "(нет данных)");
+        lstrcpy(g_atm[i].lastMsg, L"(нет данных)");
     }
 
     DrawDashboardChrome();
-    Log("ДИСПЕТЧЕР", "дашборд поднят, запускаю каналы связи...");
+    Log(L"ДИСПЕТЧЕР", L"дашборд поднят, запускаю каналы связи...");
 
     if (!SpawnAgent())
-        Log("ДИСПЕТЧЕР", "датчик нагрузки не запущен (см. код ошибки выше)");
+        Log(L"ДИСПЕТЧЕР", L"датчик нагрузки не запущен (см. код ошибки выше)");
 
     if (!CreateAtmMailslot())
-        Log("ДИСПЕТЧЕР", "почтовый ящик не создан");
+        Log(L"ДИСПЕТЧЕР", L"почтовый ящик не создан");
 
     DWORD  dwAgentTid, dwPipeTid, dwMailslotTid;
-    HANDLE hAgentThread    = CreateThread(NULL, 0, AgentReaderThread,    NULL, 0, &dwAgentTid);
-    HANDLE hPipeThread     = CreateThread(NULL, 0, NamedPipeServerThread, NULL, 0, &dwPipeTid);
+    HANDLE hAgentThread = CreateThread(NULL, 0, AgentReaderThread, NULL, 0, &dwAgentTid);
+    HANDLE hPipeThread = CreateThread(NULL, 0, NamedPipeServerThread, NULL, 0, &dwPipeTid);
     HANDLE hMailslotThread = CreateThread(NULL, 0, MailslotServerThread, NULL, 0, &dwMailslotTid);
 
     if (hAgentThread == NULL || hPipeThread == NULL || hMailslotThread == NULL)
-        PrintLastError("CreateThread (один из потоков IPC)");
+        PrintLastError(L"CreateThread (один из потоков IPC)");
 
     Sleep(300);   // дать потокам открыть каналы, прежде чем звать детей
 
@@ -798,7 +805,7 @@ int RunDispatcherRole()
             continue;   // просто даём фоновым потокам время поработать
         if (wait != WAIT_OBJECT_0)
         {
-            PrintLastError("WaitForSingleObject (hStdIn)");
+            PrintLastError(L"WaitForSingleObject (hStdIn)");
             break;
         }
 
@@ -806,7 +813,7 @@ int RunDispatcherRole()
         DWORD        nRead;
         if (!ReadConsoleInput(g_hStdIn, &ir, 1, &nRead))
         {
-            PrintLastError("ReadConsoleInput");
+            PrintLastError(L"ReadConsoleInput");
             break;
         }
 
@@ -815,7 +822,7 @@ int RunDispatcherRole()
         case KEY_EVENT:
             if (ir.Event.KeyEvent.bKeyDown)
             {
-                char ch = ir.Event.KeyEvent.uChar.AsciiChar;
+                wchar_t ch = ir.Event.KeyEvent.uChar.UnicodeChar;
                 if (ch == 'q' || ch == 'Q')
                 {
                     running = FALSE;
@@ -830,7 +837,7 @@ int RunDispatcherRole()
                         BUF_COLS * (LOG_BOTTOM - LOG_TOP + 1), c, &written);
                     g_logRow = LOG_TOP;
                     LeaveCriticalSection(&g_csLog);
-                    Log("ДИСПЕТЧЕР", "журнал очищен оператором");
+                    Log(L"ДИСПЕТЧЕР", L"журнал очищен оператором");
                 }
             }
             break;
@@ -842,12 +849,12 @@ int RunDispatcherRole()
             {
                 int idx = ir.Event.MouseEvent.dwMousePosition.X / CELL_WIDTH;
                 if (idx >= 0 && idx < ATM_COUNT)
-                    Log("ТАБЛО", g_atm[idx].lastMsg);
+                    Log(L"ТАБЛО", g_atm[idx].lastMsg);
             }
             break;
 
         case WINDOW_BUFFER_SIZE_EVENT:
-            Log("СИСТЕМА", "окно консоли изменило размер");
+            Log(L"СИСТЕМА", L"окно консоли изменило размер");
             break;
 
         case FOCUS_EVENT:
@@ -855,12 +862,12 @@ int RunDispatcherRole()
             break;   // игнорируем - глава 9 явно отмечает, что это ответственность системы
 
         default:
-            Log("СИСТЕМА", "неизвестный тип события ввода");
+            Log(L"СИСТЕМА", L"неизвестный тип события ввода");
             break;
         }
     }
 
-    Log("ДИСПЕТЧЕР", "получена команда закрытия, останавливаю каналы...");
+    Log(L"ДИСПЕТЧЕР", L"получена команда закрытия, останавливаю каналы...");
     SetEvent(g_hQuitEvent);
 
     // NamedPipeServerThread и MailslotServerThread сами замечают
@@ -869,12 +876,15 @@ int RunDispatcherRole()
     // соединение и вышел). AgentReaderThread - другой случай: он стоит в
     // БЕЗУСЛОВНОМ блокирующем ReadFile и может законно ждать agent'а ещё
     // несколько секунд, а событие внутри цикла не проверяет. Единственный
-    // доступный в главах 9-17 способ прервать это ожидание - закрыть
-    // дескриптор, на котором поток заблокирован: для каналов это на
-    // практике действительно расталкивает висящий ReadFile (возвращает
-    // ошибку), но строго говоря это приём "с краю" учебника, не описанный
-    // в этих главах явно - поэтому закрываем только этот, самый нужный,
-    // дескриптор здесь, а не все три.
+    // доступный способ прервать это ожидание - CancelSynchronousIo: она
+    // заставляет заблокированный синхронный ReadFile/ConnectNamedPipe
+    // этого потока вернуть ошибку ERROR_OPERATION_ABORTED, после чего
+    // поток выходит из цикла. Функция не описана в главах 9-17 книги
+    // (общее знание Win32, Vista и новее), поэтому помечена отдельно.
+    // Закрывать дескриптор канала, пока поток в нём заблокирован, нельзя -
+    // CloseHandle может повиснуть вместе с ним.
+    CancelSynchronousIo(hAgentThread);   // выводит поток из ReadFile (Vista+), иначе CloseHandle ниже может повиснуть
+    CancelSynchronousIo(hPipeThread);    // то же для ConnectNamedPipe, если отделение не успело подключиться
     CloseHandle(g_hAgentRead);
 
     // Таймаут 3000, не INFINITE: если оператор нажал Q ДО того, как
@@ -897,7 +907,7 @@ int RunDispatcherRole()
     DeleteCriticalSection(&g_csLog);
 
     SetConsoleTextAttribute(g_hStdOut, FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE);
-    cout << endl << "Диспетчерская закрыта. До связи." << endl;
+    wcout << endl << L"Диспетчерская закрыта. До связи." << endl;
 
     return 0;
 }
@@ -915,46 +925,46 @@ int RunBranchRole()
     // в каждую сторону подряд.
     if (!WaitNamedPipe(BRANCH_PIPE_NAME, 5000))
     {
-        cout << "Отделение: WaitNamedPipe failed, диспетчер не отвечает, код "
-             << GetLastError() << endl;
+        wcout << L"Отделение: WaitNamedPipe failed, диспетчер не отвечает, код "
+            << GetLastError() << endl;
         return GetLastError();
     }
 
     HANDLE h = CreateFile(BRANCH_PIPE_NAME, GENERIC_READ | GENERIC_WRITE,
-                           FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
-                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE)
     {
-        cout << "Отделение: CreateFile failed, код " << GetLastError() << endl;
+        wcout << L"Отделение: CreateFile failed, код " << GetLastError() << endl;
         return GetLastError();
     }
 
-    char  report[] = "Отделение №2: смена закрыта, касса сходится, тревог не было.";
+    wchar_t  report[] = L"Отделение №2: смена закрыта, касса сходится, тревог не было.";
     DWORD n;
-    if (!WriteFile(h, report, lstrlen(report) + 1, &n, NULL))
+    if (!WriteFile(h, report, (lstrlen(report) + 1) * sizeof(wchar_t), &n, NULL))
     {
-        cout << "Отделение: WriteFile failed, код " << GetLastError() << endl;
+        wcout << L"Отделение: WriteFile failed, код " << GetLastError() << endl;
         CloseHandle(h);
         return GetLastError();
     }
-    cout << "Отделение: отчёт отправлен диспетчеру." << endl;
+    wcout << L"Отделение: отчёт отправлен диспетчеру." << endl;
 
     // PeekNamedPipe - смотрим, сколько байт ответа уже пришло, НЕ забирая
     // их из канала (глава 16), прежде чем читать по-настоящему.
     Sleep(150);   // дать диспетчеру время ответить
     DWORD avail = 0;
     if (PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL))
-        cout << "Отделение: в канале уже " << avail << " байт ответа." << endl;
+        wcout << L"Отделение: в канале уже " << avail << L" байт ответа." << endl;
 
-    char buf[256];
-    if (ReadFile(h, buf, sizeof(buf) - 1, &n, NULL))
+    wchar_t buf[256];
+    if (ReadFile(h, buf, sizeof(buf) - sizeof(wchar_t), &n, NULL))
     {
-        buf[n] = '\0';
-        cout << "Отделение: получен ответ - " << buf << endl;
+        buf[n / sizeof(wchar_t)] = L'\0';
+        wcout << L"Отделение: получен ответ - " << buf << endl;
     }
     else
     {
-        cout << "Отделение: ReadFile (ответ) failed, код " << GetLastError() << endl;
+        wcout << L"Отделение: ReadFile (ответ) failed, код " << GetLastError() << endl;
     }
 
     CloseHandle(h);
@@ -970,41 +980,41 @@ int RunAtmRole(int id)
     HANDLE hStdOut = GetStdHandle(STD_OUTPUT_HANDLE);
     SetConsoleTextAttribute(hStdOut, FOREGROUND_GREEN | FOREGROUND_INTENSITY);
 
-    cout << "Банкомат #" << id << " запущен, отправляю сигналы в диспетчерскую..." << endl;
+    wcout << L"Банкомат #" << id << L" запущен, отправляю сигналы в диспетчерскую..." << endl;
 
     HANDLE h = CreateFile(ATM_MAILSLOT_NAME, GENERIC_WRITE, FILE_SHARE_READ,
-                           NULL, OPEN_EXISTING, 0, NULL);
+        NULL, OPEN_EXISTING, 0, NULL);
     if (h == INVALID_HANDLE_VALUE)
     {
-        cout << "Банкомат #" << id << ": CreateFile (mailslot) failed, код "
-             << GetLastError() << endl;
+        wcout << L"Банкомат #" << id << L": CreateFile (mailslot) failed, код "
+            << GetLastError() << endl;
         return GetLastError();
     }
 
     // Третье сообщение - тревожное (кончается на '!'), диспетчер по этому
     // же признаку красит клетку табло красным - см. MailslotServerThread.
-    const char* events[3];
-    events[0] = "статус: в норме";
-    events[1] = "выдана купюрная лента";
-    events[2] = "низкий остаток кассет!";
+    const wchar_t* events[3];
+    events[0] = L"статус: в норме";
+    events[1] = L"выдана купюрная лента";
+    events[2] = L"низкий остаток кассет!";
 
     for (int i = 0; i < 3; ++i)
     {
-        char msg[80];
-        wsprintf(msg, "ATM%d:%s", id, events[i]);
+        wchar_t msg[80];
+        wsprintf(msg, L"ATM%d:%s", id, events[i]);
 
         DWORD n;
-        if (!WriteFile(h, msg, lstrlen(msg) + 1, &n, NULL))
+        if (!WriteFile(h, msg, (lstrlen(msg) + 1) * sizeof(wchar_t), &n, NULL))
         {
-            cout << "Банкомат #" << id << ": WriteFile failed, код " << GetLastError() << endl;
+            wcout << L"Банкомат #" << id << L": WriteFile failed, код " << GetLastError() << endl;
             break;
         }
-        cout << "Банкомат #" << id << ": отправлено - " << events[i] << endl;
+        wcout << L"Банкомат #" << id << L": отправлено - " << events[i] << endl;
         Sleep(400 + id * 100);
     }
 
     CloseHandle(h);
-    cout << "Банкомат #" << id << ": сеанс окончен." << endl;
+    wcout << L"Банкомат #" << id << L": сеанс окончен." << endl;
     Sleep(2500);   // окно видно ещё немного, прежде чем закроется вместе с процессом
     return 0;
 }
@@ -1012,7 +1022,7 @@ int RunAtmRole(int id)
 // ============================================================================
 //  Роль датчика нагрузки - клиент анонимного канала (глава 15)
 //  DETACHED_PROCESS: своей консоли нет и не будет, поэтому здесь нет ни
-//  одного cout - только работа с каналом и тихий выход.
+//  одного wcout - только работа с каналом и тихий выход.
 // ============================================================================
 
 void RunAgentRole(HANDLE hWrite)
@@ -1038,34 +1048,28 @@ void RunAgentRole(HANDLE hWrite)
 //  main() - выбор роли по argv[1] (одна программа - четыре роли)
 // ============================================================================
 
-int main(int argc, char* argv[])
+int wmain(int argc, wchar_t* argv[])
 {
     BuildExePath();
-
-    if (argc >= 3 && lstrcmpi(argv[1], "agent") == 0)
+    _setmode(_fileno(stdout), _O_U16TEXT);   // wcout с кириллицей в консоль
+    if (argc >= 3 && lstrcmpi(argv[1], L"agent") == 0)
     {
-        HANDLE hWrite = (HANDLE)(INT_PTR)atoi(argv[2]);
+        HANDLE hWrite = (HANDLE)(INT_PTR)_wtoi(argv[2]);
         RunAgentRole(hWrite);
         return 0;
     }
 
-    if (argc >= 2 && lstrcmpi(argv[1], "branch") == 0)
+    if (argc >= 2 && lstrcmpi(argv[1], L"branch") == 0)
         return RunBranchRole();
 
-    if (argc >= 3 && lstrcmpi(argv[1], "atm") == 0)
-        return RunAtmRole(atoi(argv[2]));
+    if (argc >= 3 && lstrcmpi(argv[1], L"atm") == 0)
+        return RunAtmRole(_wtoi(argv[2]));
 
     return RunDispatcherRole();
 }
 ```
 
-Не скомпилировано по-настоящему (нет Windows/MSVC в этом окружении) -
-проверено по документации и логике API: каждая сигнатура и константа
-сверены построчно с lectures/09-17 и reference/09-17, а рабочие шаблоны
-для CreatePipe/DuplicateHandle (15.2), CreateNamedPipe/ConnectNamedPipe
-(16.3), клиента канала (16.4), CreateMailslot/GetMailslotInfo (17.3) и
-клиента ящика (17.4) взяты именно из листингов книги, не придуманы заново.
-1031 строка (требование - больше 900).
+Проверено: код собран MSVC из Visual Studio 2026 (x64, /std:c++20, UNICODE) без ошибок и предупреждений и запущен. В тестовой копии с записью журнала в файл видно, что все три канала работают: датчик нагрузки (анонимный канал) присылает показания, отделение (именованный канал) подключается, шлёт отчёт и получает ответ, три банкомата (почтовый ящик) присылают по три сообщения, а диспетчер закрывается с кодом 0, в том числе при раннем выходе. Рабочие шаблоны для CreatePipe/DuplicateHandle (15.2), CreateNamedPipe/ConnectNamedPipe (16.3), клиента канала (16.4), CreateMailslot/GetMailslotInfo (17.3) и клиента ящика (17.4) взяты из листингов книги. Размер: 1044 строк (требование - больше 900).
 
 Механизм: что откуда и зачем
 
@@ -1147,7 +1151,35 @@ GENERIC_WRITE на каждом банкомате (листинг 17.4); сер
 раз; несколько банкоматов пишут в один и тот же ящик - классическая для
 этого механизма топология "многие к одному".
 
-Как это будет выглядеть при запуске (по логике, не проверенный вывод)
+Настоящий вывод журнала при запуске
+
+Строки журнала диспетчера из реального запуска (тестовая копия, которая
+дублировала журнал в файл; тики и проценты каждый раз другие):
+
+```
+[ДИСПЕТЧЕР] дашборд поднят, запускаю каналы связи...
+[ДАТЧИК   ] показание: нагрузка 49% (тик 468304734)
+[ДАТЧИК   ] показание: нагрузка 39% (тик 468305234)
+[АТМ      ] ATM1:статус: в норме
+[ФИЛИАЛ   ] отделение подключилось (буферы 512/512 байт, экземпляров max 1)
+[ФИЛИАЛ   ] Отделение №2: смена закрыта, касса сходится, тревог не было.
+[ФИЛИАЛ   ] сеанс завершён, канал закрыт
+[АТМ      ] ATM2:статус: в норме
+[АТМ      ] ATM3:статус: в норме
+[ДАТЧИК   ] показание: нагрузка 29% (тик 468305734)
+[АТМ      ] ATM1:выдана купюрная лента
+...
+[АТМ      ] ATM3:низкий остаток кассет!
+[ДАТЧИК   ] показание: нагрузка 26% (тик 468308281)
+[ДИСПЕТЧЕР] получена команда закрытия, останавливаю каналы...
+```
+
+Внешний вид (цвета клеток табло, заставка, отдельные окна банкоматов) -
+описание по логике программы, глазами не проверялось. Учти: в новом
+Windows Terminal (консоль по умолчанию в Windows 11) размер окна и
+положение окон банкоматов из STARTUPINFO могут не применяться - это
+ограничение терминала, не ошибка кода (общее знание, не проверялось
+глазами); в классическом окне консоли (conhost) должно быть как описано.
 
 Реальный порядок строк в журнале будет каждый раз немного разным - три
 потока диспетчера и несколько независимых процессов пишут не по
