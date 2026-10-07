@@ -1,714 +1,106 @@
-﻿#include <windows.h> // Подключает Windows API для работы с консолью, дескрипторами, событиями и буферами
-#include <iostream> // Подключает стандартный ввод и вывод: cin и cout
-#include <conio.h> // Подключает _getch() для ожидания нажатия клавиши
-#include <cstring> // Подключает функции работы со строками, например strlen()
+﻿#include <windows.h>
+#include <io.h>
+#include <fcntl.h>
+#include <iostream>
+#include <cstdio>
 
-using namespace std; // Позволяет использовать cout, cin и другие элементы без std::
+using namespace std;
 
-HANDLE hIn; // Глобальный дескриптор входной консоли
-HANDLE hOut; // Глобальный дескриптор выходной консоли
-
-void pauseProgram() // Функция ожидания нажатия клавиши
+static const wchar_t* ButtonName(DWORD state, DWORD mask)
 {
-    cout << "\nPress any key..."; // Выводит сообщение пользователю
-    _getch(); // Ждет нажатия любой клавиши без Enter
-    system("cls"); // Очищает экран консоли
+    return (state & mask) ? L"нажата" : L"---";
 }
 
-void info() // Функция вывода информации о консоли
+static void PrintMouseEvent(const MOUSE_EVENT_RECORD& m)
 {
-    CONSOLE_SCREEN_BUFFER_INFO s; // Структура для хранения информации об экранном буфере
-    DWORD inputMode, outputMode, mouseButtons; // Переменные для режимов консоли и количества кнопок мыши
-    COORD maxSize; // Переменная для хранения максимального размера окна
+    wprintf(L"MOUSE  X=%3d  Y=%3d  ", m.dwMousePosition.X, m.dwMousePosition.Y);
 
-    GetConsoleScreenBufferInfo(hOut, &s); // Получает информацию об экранном буфере
-    GetConsoleMode(hIn, &inputMode); // Получает текущий режим входной консоли
-    GetConsoleMode(hOut, &outputMode); // Получает текущий режим выходной консоли
-    GetNumberOfConsoleMouseButtons(&mouseButtons); // Получает количество кнопок мыши
-    maxSize = GetLargestConsoleWindowSize(hOut); // Получает максимально возможный размер окна
+    wprintf(L"L=%s  R=%s  M=%s  ",
+        ButtonName(m.dwButtonState, FROM_LEFT_1ST_BUTTON_PRESSED),
+        ButtonName(m.dwButtonState, RIGHTMOST_BUTTON_PRESSED),
+        ButtonName(m.dwButtonState, FROM_LEFT_2ND_BUTTON_PRESSED));
 
-    cout << "===== SYSTEM INFORMATION =====\n\n"; // Выводит заголовок раздела
+    DWORD flags = m.dwEventFlags;
 
-    cout << "Window: " // Выводит название параметра окна
-        << s.srWindow.Right - s.srWindow.Left + 1 << " x " // Вычисляет ширину видимого окна
-        << s.srWindow.Bottom - s.srWindow.Top + 1 << "\n"; // Вычисляет высоту видимого окна
-
-    cout << "Buffer: " // Выводит название параметра буфера
-        << s.dwSize.X << " x " << s.dwSize.Y << "\n"; // Выводит ширину и высоту экранного буфера
-
-    cout << "Cursor: " // Выводит название параметра курсора
-        << s.dwCursorPosition.X << ", " // Выводит координату X курсора
-        << s.dwCursorPosition.Y << "\n"; // Выводит координату Y курсора
-
-    cout << "Largest window: " // Выводит название максимального размера
-        << maxSize.X << " x " << maxSize.Y << "\n"; // Выводит максимальную ширину и высоту окна
-
-    cout << "Mouse buttons: " << mouseButtons << "\n"; // Выводит количество кнопок мыши
-    cout << "Input mode: " << inputMode << "\n"; // Выводит режим входной консоли
-    cout << "Output mode: " << outputMode << "\n"; // Выводит режим выходной консоли
-
-    pauseProgram(); // Ожидает нажатия клавиши и очищает экран
-}
-
-void cursorControl() // Функция управления курсором
-{
-    CONSOLE_CURSOR_INFO cursorInfo; // Структура для хранения информации о курсоре
-    CONSOLE_SCREEN_BUFFER_INFO screenInfo; // Структура для хранения информации об экранном буфере
-
-    GetConsoleCursorInfo(hOut, &cursorInfo); // Получает текущие параметры курсора
-    GetConsoleScreenBufferInfo(hOut, &screenInfo); // Получает информацию об экранном буфере
-
-    cout << "===== CURSOR CONTROL =====\n\n"; // Выводит заголовок раздела
-
-    cout << "Cursor size: " // Выводит размер курсора
-        << cursorInfo.dwSize << "%\n"; // Показывает размер курсора в процентах
-
-    cout << "Visible: " // Выводит информацию о видимости курсора
-        << (cursorInfo.bVisible ? "YES" : "NO") << "\n"; // Если курсор видим — YES, иначе NO
-
-    COORD position = { 5, 5 }; // Создает координаты X=5 и Y=5
-
-    SetConsoleCursorPosition(hOut, position); // Перемещает курсор в позицию 5,5
-
-    cout << "Cursor moved using Win32 API"; // Выводит текст в новой позиции курсора
-
-    CONSOLE_CURSOR_INFO hiddenCursor = cursorInfo; // Создает копию исходных параметров курсора
-    hiddenCursor.dwSize = 100; // Устанавливает размер курсора 100 процентов
-    hiddenCursor.bVisible = FALSE; // Делает курсор невидимым
-
-    SetConsoleCursorInfo(hOut, &hiddenCursor); // Применяет новые параметры курсора
-
-    Sleep(700); // Приостанавливает программу на 700 миллисекунд
-
-    SetConsoleCursorInfo(hOut, &cursorInfo); // Восстанавливает исходные параметры курсора
-    SetConsoleCursorPosition(hOut, screenInfo.dwCursorPosition); // Возвращает курсор на исходную позицию
-
-    pauseProgram(); // Ожидает нажатия клавиши и очищает экран
-}
-
-void colors() // Функция демонстрации цветов и атрибутов
-{
-    DWORD written; // Переменная для количества записанных атрибутов
-    WORD attributes[10]; // Массив из 10 атрибутов цветов
-
-    cout << "===== COLORS AND ATTRIBUTES =====\n\n"; // Выводит заголовок раздела
-
-    SetConsoleTextAttribute(hOut, 10); // Устанавливает зеленый цвет текста
-    cout << "GREEN  - system message\n"; // Выводит сообщение зеленым цветом
-
-    SetConsoleTextAttribute(hOut, 11); // Устанавливает голубой цвет текста
-    cout << "CYAN   - information\n"; // Выводит сообщение голубым цветом
-
-    SetConsoleTextAttribute(hOut, 14); // Устанавливает желтый цвет текста
-    cout << "YELLOW - warning\n"; // Выводит сообщение желтым цветом
-
-    SetConsoleTextAttribute(hOut, 12); // Устанавливает красный цвет текста
-    cout << "RED    - alert\n"; // Выводит сообщение красным цветом
-
-    SetConsoleTextAttribute(hOut, 15); // Возвращает белый цвет текста
-
-    FillConsoleOutputAttribute( // Заполняет указанную область определенным атрибутом
-        hOut, // Дескриптор экранного буфера
-        9, // Атрибут цвета
-        10, // Количество позиций для изменения
-        { 0, 8 }, // Начальная координата X=0, Y=8
-        &written // Переменная для количества обработанных позиций
-    ); // Завершает вызов функции
-
-    for (int i = 0; i < 10; i++) // Цикл проходит по 10 элементам массива
-        attributes[i] = 15; // Устанавливает белый атрибут каждому элементу
-
-    WriteConsoleOutputAttribute( // Записывает атрибуты в экранный буфер
-        hOut, // Дескриптор экранного буфера
-        attributes, // Массив атрибутов
-        10, // Количество атрибутов
-        { 0, 8 }, // Начальная координата
-        &written // Количество записанных атрибутов
-    ); // Завершает вызов функции
-
-    ReadConsoleOutputAttribute( // Считывает атрибуты из экранного буфера
-        hOut, // Дескриптор экранного буфера
-        attributes, // Массив для сохранения прочитанных атрибутов
-        10, // Количество атрибутов
-        { 0, 8 }, // Начальная координата чтения
-        &written // Количество прочитанных атрибутов
-    ); // Завершает вызов функции
-
-    cout << "\nFirst attribute: " // Выводит название первого атрибута
-        << attributes[0] << "\n"; // Выводит значение первого атрибута
-
-    pauseProgram(); // Ожидает нажатия клавиши и очищает экран
-}
-
-void screenOutput() // Функция работы с экранным буфером
-{
-    DWORD written; // Переменная для количества записанных символов
-    DWORD read; // Переменная для количества прочитанных символов
-    char text[30] = {}; // Создает буфер для хранения прочитанного текста
-
-    cout << "===== SCREEN BUFFER =====\n\n"; // Выводит заголовок раздела
-
-    const char* message = "WIN32 SCREEN BUFFER"; // Создает строку для записи в экранный буфер
-
-    WriteConsoleOutputCharacterA( // Записывает символы непосредственно в экранный буфер
-        hOut, // Дескриптор экранного буфера
-        message, // Текст для записи
-        static_cast<DWORD>(strlen(message)), // Вычисляет длину строки
-        { 5, 5 }, // Координата начала записи
-        &written // Количество записанных символов
-    ); // Завершает вызов функции
-
-    FillConsoleOutputCharacterA( // Заполняет указанную область одним символом
-        hOut, // Дескриптор экранного буфера
-        '*', // Символ для заполнения
-        25, // Количество символов
-        { 5, 7 }, // Начальная координата
-        &written // Количество записанных символов
-    ); // Завершает вызов функции
-
-    ReadConsoleOutputCharacterA( // Читает символы непосредственно из экранного буфера
-        hOut, // Дескриптор экранного буфера
-        text, // Буфер для сохранения прочитанного текста
-        static_cast<DWORD>(strlen(message)), // Количество символов для чтения
-        { 5, 5 }, // Координата начала чтения
-        &read // Количество прочитанных символов
-    ); // Завершает вызов функции
-
-    cout << "\nRead from screen: "; // Выводит сообщение перед прочитанным текстом
-    cout.write(text, read); // Выводит прочитанное количество символов
-    cout << "\n"; // Переходит на новую строку
-
-    pauseProgram(); // Ожидает нажатия клавиши и очищает экран
-}
-
-void charInfoDemo() // Функция демонстрации структуры CHAR_INFO
-{
-    CHAR_INFO data[25]; // Массив из 25 элементов для записи символов
-    CHAR_INFO result[25]; // Массив из 25 элементов для чтения символов
-
-    SMALL_RECT area = { 5, 5, 9, 9 }; // Задает прямоугольную область 5x5
-    COORD size = { 5, 5 }; // Задает размер области 5x5
-    COORD zero = { 0, 0 }; // Задает начальную координату источника
-
-    for (int i = 0; i < 25; i++) // Цикл заполняет все 25 элементов
+    if (flags == 0)
     {
-        data[i].Char.AsciiChar = (i % 2) ? '.' : '#'; // Чередует символы точки и решетки
-        data[i].Attributes = 11; // Устанавливает атрибут цвета 11
-    } // Завершает цикл заполнения массива
-
-    cout << "===== CHAR_INFO =====\n\n"; // Выводит заголовок раздела
-
-    WriteConsoleOutputA( // Записывает массив CHAR_INFO в экранный буфер
-        hOut, // Дескриптор экранного буфера
-        data, // Массив символов и атрибутов
-        size, // Размер записываемой области
-        zero, // Начальная координата источника
-        &area // Область назначения
-    ); // Завершает вызов функции
-
-    ReadConsoleOutputA( // Читает данные из экранного буфера
-        hOut, // Дескриптор экранного буфера
-        result, // Массив для сохранения результата
-        size, // Размер читаемой области
-        zero, // Начальная координата
-        &area // Область чтения
-    ); // Завершает вызов функции
-
-    cout << "\nCHAR_INFO area was written and read.\n"; // Сообщает о завершении записи и чтения
-
-    pauseProgram(); // Ожидает нажатия клавиши и очищает экран
+        wprintf(L"событие: КЛИК\n");
+    }
+    else if (flags & DOUBLE_CLICK)
+    {
+        wprintf(L"событие: ДВОЙНОЙ КЛИК\n");
+    }
+    else if (flags & MOUSE_HWHEELED)
+    {
+        SHORT delta = (SHORT)HIWORD(m.dwButtonState);
+        wprintf(L"событие: ГОРИЗОНТ. СКРОЛЛ  delta=%d\n", delta);
+    }
+    else if (flags & MOUSE_WHEELED)
+    {
+        SHORT delta = (SHORT)HIWORD(m.dwButtonState);
+        wprintf(L"событие: ВЕРТИКАЛЬН. СКРОЛЛ  delta=%d\n", delta);
+    }
+    else if (flags & MOUSE_MOVED)
+    {
+        wprintf(L"событие: ДВИЖЕНИЕ\n");
+    }
+    else
+    {
+        wprintf(L"событие: прочее (flags=0x%X)\n", flags);
+    }
 }
 
-void events() // Функция обработки событий консоли
+int wmain()
 {
-    DWORD oldMode; // Переменная для сохранения старого режима консоли
-    DWORD read; // Переменная для количества прочитанных событий
-    INPUT_RECORD record; // Структура для хранения одного события
+    _setmode(_fileno(stdout), _O_U16TEXT);
 
-    GetConsoleMode(hIn, &oldMode); // Получает текущий режим входной консоли
-
-    DWORD newMode = oldMode; // Создает копию старого режима для изменения
-
-    newMode |= ENABLE_MOUSE_INPUT; // Включает обработку событий мыши
-    newMode |= ENABLE_WINDOW_INPUT; // Включает события изменения размера окна
-    newMode |= ENABLE_EXTENDED_FLAGS; // Включает расширенные флаги консоли
-    newMode &= ~ENABLE_QUICK_EDIT_MODE; // Отключает режим Quick Edit
-    newMode &= ~ENABLE_LINE_INPUT; // Отключает построчный ввод
-    newMode &= ~ENABLE_ECHO_INPUT; // Отключает отображение вводимых символов
-
-    SetConsoleMode(hIn, newMode); // Применяет новый режим консоли
-
-    cout << "===== EVENT MONITOR =====\n\n"; // Выводит заголовок мониторинга событий
-    cout << "Press Q to exit.\n\n"; // Сообщает, что Q завершает мониторинг
-
-    while (true) // Запускает бесконечный цикл обработки событий
+    HANDLE hIn = GetStdHandle(STD_INPUT_HANDLE);
+    if (hIn == INVALID_HANDLE_VALUE)
     {
-        ReadConsoleInput(hIn, &record, 1, &read); // Читает одно событие из входного буфера
+        wprintf(L"GetStdHandle failed, err=%lu\n", GetLastError());
+        return 1;
+    }
 
-        if (record.EventType == KEY_EVENT) // Проверяет, является ли событие клавиатурным
+    DWORD oldMode = 0;
+    if (!GetConsoleMode(hIn, &oldMode))
+    {
+        wprintf(L"GetConsoleMode failed, err=%lu\n", GetLastError());
+        return 1;
+    }
+
+    DWORD newMode = oldMode;
+    newMode |= ENABLE_MOUSE_INPUT;
+    newMode &= ~ENABLE_QUICK_EDIT_MODE;
+
+    if (!SetConsoleMode(hIn, newMode))
+    {
+        wprintf(L"SetConsoleMode failed, err=%lu\n", GetLastError());
+        return 1;
+    }
+
+    BOOL running = TRUE;
+    while (running)
+    {
+        INPUT_RECORD rec;
+        DWORD n = 0;
+
+        if (!ReadConsoleInput(hIn, &rec, 1, &n))
         {
-            KEY_EVENT_RECORD key = record.Event.KeyEvent; // Получает данные события клавиатуры
+            wprintf(L"ReadConsoleInput failed, err=%lu\n", GetLastError());
+            break;
+        }
 
-            if (key.bKeyDown) // Проверяет, что клавиша нажата, а не отпущена
-            {
-                cout << "KEY: " // Выводит информацию о клавише
-                    << key.wVirtualKeyCode // Выводит виртуальный код клавиши
-                    << " CHAR: " // Выводит подпись символа
-                    << key.uChar.AsciiChar // Выводит ASCII-код символа
-                    << "\n"; // Переходит на новую строку
-
-                if (key.uChar.AsciiChar == 'q' || // Проверяет нажатие маленькой q
-                    key.uChar.AsciiChar == 'Q') // Проверяет нажатие большой Q
-                {
-                    break; // Выходит из цикла обработки событий
-                } // Завершает проверку клавиши Q
-            } // Завершает проверку нажатия клавиши
-        } // Завершает обработку клавиатурного события
-        else if (record.EventType == MOUSE_EVENT) // Проверяет событие мыши
+        switch (rec.EventType)
         {
-            MOUSE_EVENT_RECORD mouse = // Создает структуру для данных мыши
-                record.Event.MouseEvent; // Получает данные события мыши
-
-            cout << "MOUSE: X=" // Выводит координату X мыши
-                << mouse.dwMousePosition.X // Получает координату X
-                << " Y=" // Выводит координату Y
-                << mouse.dwMousePosition.Y // Получает координату Y
-                << "\n"; // Переходит на новую строку
-        } // Завершает обработку события мыши
-        else if (record.EventType == WINDOW_BUFFER_SIZE_EVENT) // Проверяет изменение размера окна
-        {
-            cout << "WINDOW: " // Выводит информацию об изменении окна
-                << record.Event.WindowBufferSizeEvent.dwSize.X // Выводит новую ширину
-                << " x " // Выводит разделитель размеров
-                << record.Event.WindowBufferSizeEvent.dwSize.Y // Выводит новую высоту
-                << "\n"; // Переходит на новую строку
-        } // Завершает обработку события изменения размера
-    } // Завершает цикл обработки событий
-
-    SetConsoleMode(hIn, oldMode); // Восстанавливает первоначальный режим консоли
-    system("cls"); // Очищает экран после выхода из мониторинга
-}
-
-void inputBuffer() // Функция демонстрации входного буфера
-{
-    DWORD count; // Переменная для количества событий во входном буфере
-    DWORD read; // Переменная для количества прочитанных событий
-    INPUT_RECORD record = {}; // Создает пустую структуру события
-
-    cout << "===== INPUT BUFFER =====\n\n"; // Выводит заголовок раздела
-
-    GetNumberOfConsoleInputEvents(hIn, &count); // Получает количество событий во входном буфере
-
-    cout << "Events: " // Выводит количество событий
-        << count << "\n"; // Показывает количество событий
-
-    PeekConsoleInput( // Просматривает событие без удаления его из буфера
-        hIn, // Дескриптор входной консоли
-        &record, // Адрес структуры для сохранения события
-        1, // Количество событий для просмотра
-        &read // Количество реально прочитанных событий
-    ); // Завершает вызов функции
-
-    cout << "PeekConsoleInput: " // Выводит результат просмотра
-        << (read ? "record found" : "buffer empty") // Показывает найдено событие или нет
-        << "\n"; // Переходит на новую строку
-
-    record.EventType = KEY_EVENT; // Устанавливает тип события — клавиатура
-    record.Event.KeyEvent.bKeyDown = TRUE; // Указывает, что клавиша нажата
-    record.Event.KeyEvent.wRepeatCount = 1; // Устанавливает количество повторений равным 1
-    record.Event.KeyEvent.wVirtualKeyCode = 'X'; // Устанавливает виртуальный код клавиши X
-    record.Event.KeyEvent.uChar.AsciiChar = 'X'; // Устанавливает ASCII-символ X
-
-    WriteConsoleInput( // Добавляет созданное событие во входной буфер
-        hIn, // Дескриптор входной консоли
-        &record, // Адрес создаваемого события
-        1, // Количество добавляемых событий
-        &read // Количество записанных событий
-    ); // Завершает вызов функции
-
-    GetNumberOfConsoleInputEvents( // Снова получает количество событий
-        hIn, // Дескриптор входной консоли
-        &count // Переменная для результата
-    ); // Завершает вызов функции
-
-    cout << "After WriteConsoleInput: " // Выводит результат после добавления события
-        << count << "\n"; // Показывает новое количество событий
-
-    FlushConsoleInputBuffer(hIn); // Полностью очищает входной буфер
-
-    GetNumberOfConsoleInputEvents( // Получает количество событий после очистки
-        hIn, // Дескриптор входной консоли
-        &count // Переменная для результата
-    ); // Завершает вызов функции
-
-    cout << "After Flush: " // Выводит результат очистки
-        << count << "\n"; // Показывает количество оставшихся событий
-
-    pauseProgram(); // Ожидает нажатия клавиши и очищает экран
-}
-
-void ioDemo() // Функция демонстрации высокого и низкого уровня I/O
-{
-    char text[100] = {}; // Создает буфер для введенного текста
-    DWORD read; // Переменная для количества прочитанных данных
-    DWORD written; // Переменная для количества записанных данных
-
-    cout << "===== HIGH AND LOW LEVEL I/O =====\n\n"; // Выводит заголовок раздела
-
-    const char* message = // Создает указатель на сообщение
-        "High-level: WriteConsole\n"; // Текст для высокоуровневого вывода
-
-    WriteConsoleA( // Выполняет высокоуровневую запись в консоль
-        hOut, // Дескриптор вывода
-        message, // Текст сообщения
-        static_cast<DWORD>(strlen(message)), // Определяет длину сообщения
-        &written, // Сохраняет количество записанных символов
-        NULL // Дополнительный параметр отсутствует
-    ); // Завершает вызов функции
-
-    cout << "Enter text: "; // Просит пользователя ввести текст
-
-    ReadConsoleA( // Выполняет высокоуровневое чтение из консоли
-        hIn, // Дескриптор входа
-        text, // Буфер для введенного текста
-        sizeof(text) - 1, // Максимальное количество символов
-        &read, // Сохраняет количество прочитанных символов
-        NULL // Дополнительный параметр отсутствует
-    ); // Завершает вызов функции
-
-    if (read > 0) // Проверяет, был ли введен текст
-        text[read - 1] = '\0'; // Удаляет символ Enter из конца строки
-
-    cout << "You entered: " // Выводит введенный текст
-        << text << "\n"; // Показывает содержимое буфера
-
-    HANDLE input = CreateFileA( // Создает дескриптор для консольного ввода
-        "CONIN$", // Специальное имя входа консоли
-        GENERIC_READ, // Разрешает чтение
-        FILE_SHARE_READ, // Разрешает совместное чтение
-        NULL, // Атрибуты безопасности отсутствуют
-        OPEN_EXISTING, // Открывает существующий объект
-        0, // Дополнительные флаги отсутствуют
-        NULL // Шаблон отсутствует
-    ); // Завершает создание входного дескриптора
-
-    HANDLE output = CreateFileA( // Создает дескриптор для консольного вывода
-        "CONOUT$", // Специальное имя выхода консоли
-        GENERIC_WRITE, // Разрешает запись
-        FILE_SHARE_WRITE, // Разрешает совместную запись
-        NULL, // Атрибуты безопасности отсутствуют
-        OPEN_EXISTING, // Открывает существующий объект
-        0, // Дополнительные флаги отсутствуют
-        NULL // Шаблон отсутствует
-    ); // Завершает создание выходного дескриптора
-
-    if (output != INVALID_HANDLE_VALUE) // Проверяет успешность открытия консольного вывода
-    {
-        const char* lowMessage = // Создает сообщение для низкоуровневого вывода
-            "Low-level: WriteFile -> CONOUT$\n"; // Текст сообщения
-
-        WriteFile( // Выполняет низкоуровневую запись
-            output, // Дескриптор выхода
-            lowMessage, // Текст сообщения
-            static_cast<DWORD>(strlen(lowMessage)), // Размер сообщения
-            &written, // Количество записанных данных
-            NULL // Дополнительный параметр отсутствует
-        ); // Завершает запись
-
-        CloseHandle(output); // Закрывает дескриптор выхода
-    } // Завершает проверку выходного дескриптора
-
-    if (input != INVALID_HANDLE_VALUE) // Проверяет успешность открытия консольного ввода
-    {
-        char key; // Переменная для одного символа
-
-        cout << "Press one key: "; // Просит пользователя нажать одну клавишу
-
-        ReadFile( // Выполняет низкоуровневое чтение
-            input, // Дескриптор входа
-            &key, // Адрес переменной для сохранения символа
-            1, // Читает один байт
-            &read, // Сохраняет количество прочитанных байт
-            NULL // Дополнительный параметр отсутствует
-        ); // Завершает чтение
-
-        cout << "\nReadFile received: " // Выводит полученный символ
-            << key << "\n"; // Показывает символ
-
-        CloseHandle(input); // Закрывает дескриптор входа
-    } // Завершает проверку входного дескриптора
-
-    pauseProgram(); // Ожидает нажатия клавиши и очищает экран
-}
-
-void newBuffer() // Функция создания нового экранного буфера
-{
-    HANDLE buffer; // Дескриптор нового экранного буфера
-    DWORD written; // Переменная для количества записанных символов
-
-    buffer = CreateConsoleScreenBuffer( // Создает новый экранный буфер
-        GENERIC_READ | GENERIC_WRITE, // Разрешает чтение и запись
-        0, // Совместный доступ отсутствует
-        NULL, // Атрибуты безопасности отсутствуют
-        CONSOLE_TEXTMODE_BUFFER, // Создает текстовый экранный буфер
-        NULL // Дополнительный параметр отсутствует
-    ); // Завершает создание буфера
-
-    if (buffer == INVALID_HANDLE_VALUE) // Проверяет, удалось ли создать буфер
-    {
-        cout << "Buffer creation failed.\n"; // Выводит сообщение об ошибке
-        pauseProgram(); // Ожидает нажатия клавиши
-        return; // Выходит из функции
-    } // Завершает проверку создания буфера
-
-    SetConsoleActiveScreenBuffer(buffer); // Делает новый буфер активным
-
-    const char* message = // Создает указатель на текст нового буфера
-        "===== NEW SCREEN BUFFER =====\n\n" // Первая строка сообщения
-        "This is another screen buffer.\n"; // Вторая строка сообщения
-
-    WriteConsoleA( // Записывает сообщение в новый экранный буфер
-        buffer, // Дескриптор нового буфера
-        message, // Текст сообщения
-        static_cast<DWORD>(strlen(message)), // Размер текста
-        &written, // Количество записанных символов
-        NULL // Дополнительный параметр отсутствует
-    ); // Завершает запись
-
-    Sleep(1500); // Показывает новый буфер в течение 1,5 секунды
-
-    SetConsoleActiveScreenBuffer(hOut); // Возвращает старый экранный буфер
-
-    CloseHandle(buffer); // Закрывает дескриптор нового буфера
-
-    pauseProgram(); // Ожидает нажатия клавиши и очищает экран
-}
-
-void windowControl() // Функция управления окном консоли
-{
-    char title[256]; // Массив для хранения заголовка окна
-    HWND window; // Переменная для дескриптора окна
-    COORD maxSize; // Переменная для максимального размера окна
-
-    GetConsoleTitleA( // Получает текущий заголовок консоли
-        title, // Буфер для сохранения заголовка
-        sizeof(title) // Максимальный размер буфера
-    ); // Завершает получение заголовка
-
-    window = GetConsoleWindow(); // Получает дескриптор окна консоли
-
-    maxSize = GetLargestConsoleWindowSize(hOut); // Получает максимальный размер окна
-
-    cout << "===== CONSOLE WINDOW =====\n\n"; // Выводит заголовок раздела
-
-    cout << "Title: " // Выводит название параметра
-        << title << "\n"; // Выводит текущий заголовок окна
-
-    cout << "Window handle: " // Выводит название параметра
-        << window << "\n"; // Выводит дескриптор окна
-
-    cout << "Largest size: " // Выводит максимальный размер
-        << maxSize.X << " x " << maxSize.Y << "\n"; // Выводит ширину и высоту
-
-    SetConsoleTitleA( // Изменяет заголовок окна консоли
-        "Win32 Console Control Center" // Новый заголовок
-    ); // Завершает изменение заголовка
-
-    cout << "\nConsole title changed.\n"; // Сообщает об изменении заголовка
-
-    pauseProgram(); // Ожидает нажатия клавиши и очищает экран
-}
-
-void modes() // Функция просмотра и изменения режимов консоли
-{
-    DWORD mode; // Переменная для хранения режима консоли
-
-    GetConsoleMode(hIn, &mode); // Получает текущий режим входной консоли
-
-    cout << "===== CONSOLE MODES =====\n\n"; // Выводит заголовок раздела
-
-    cout << "ENABLE_LINE_INPUT: " // Выводит название режима построчного ввода
-        << !!(mode & ENABLE_LINE_INPUT) // Проверяет включен ли режим
-        << "\n"; // Переходит на новую строку
-
-    cout << "ENABLE_ECHO_INPUT: " // Выводит название режима отображения ввода
-        << !!(mode & ENABLE_ECHO_INPUT) // Проверяет включен ли режим
-        << "\n"; // Переходит на новую строку
-
-    cout << "ENABLE_PROCESSED_INPUT: " // Выводит название режима обработки ввода
-        << !!(mode & ENABLE_PROCESSED_INPUT) // Проверяет включен ли режим
-        << "\n"; // Переходит на новую строку
-
-    cout << "ENABLE_MOUSE_INPUT: " // Выводит название режима мыши
-        << !!(mode & ENABLE_MOUSE_INPUT) // Проверяет включен ли ввод мыши
-        << "\n"; // Переходит на новую строку
-
-    cout << "ENABLE_WINDOW_INPUT: " // Выводит название режима изменения окна
-        << !!(mode & ENABLE_WINDOW_INPUT) // Проверяет включен ли режим окна
-        << "\n"; // Переходит на новую строку
-
-    SetConsoleMode( // Устанавливает новый режим консоли
-        hIn, // Дескриптор входной консоли
-        mode | ENABLE_MOUSE_INPUT // Сохраняет старые настройки и включает мышь
-    ); // Завершает установку режима
-
-    cout << "\nMouse input mode enabled.\n"; // Сообщает, что ввод мыши включен
-
-    pauseProgram(); // Ожидает нажатия клавиши и очищает экран
-
-    SetConsoleMode(hIn, mode); // Восстанавливает исходный режим консоли
-}
-
-void redirectOutput() // Функция перенаправления вывода в файл
-{
-    HANDLE oldOutput = // Создает переменную для старого дескриптора вывода
-        GetStdHandle(STD_OUTPUT_HANDLE); // Получает стандартный дескриптор вывода
-
-    HANDLE file = CreateFileA( // Создает файл для записи
-        "console_log.txt", // Имя создаваемого файла
-        GENERIC_WRITE, // Разрешает запись в файл
-        0, // Запрещает совместный доступ
-        NULL, // Атрибуты безопасности отсутствуют
-        CREATE_ALWAYS, // Создает файл заново или перезаписывает существующий
-        FILE_ATTRIBUTE_NORMAL, // Указывает обычный файл
-        NULL // Шаблон отсутствует
-    ); // Завершает создание файла
-
-    if (file == INVALID_HANDLE_VALUE) // Проверяет, удалось ли создать файл
-    {
-        cout << "File creation failed.\n"; // Выводит сообщение об ошибке
-        pauseProgram(); // Ожидает нажатия клавиши
-        return; // Выходит из функции
-    } // Завершает проверку файла
-
-    SetStdHandle( // Изменяет стандартный дескриптор вывода
-        STD_OUTPUT_HANDLE, // Указывает стандартный вывод
-        file // Вместо консоли устанавливает файл
-    ); // Завершает перенаправление вывода
-
-    const char* message = // Создает сообщение для записи
-        "Win32 Console Control Center\n" // Первая строка файла
-        "Output redirected by SetStdHandle.\n"; // Вторая строка файла
-
-    DWORD written; // Переменная для количества записанных байт
-
-    WriteFile( // Записывает сообщение в файл
-        file, // Дескриптор файла
-        message, // Текст сообщения
-        static_cast<DWORD>(strlen(message)), // Размер сообщения
-        &written, // Количество записанных байт
-        NULL // Дополнительный параметр отсутствует
-    ); // Завершает запись в файл
-
-    SetStdHandle( // Восстанавливает стандартный вывод
-        STD_OUTPUT_HANDLE, // Указывает стандартный вывод
-        oldOutput // Возвращает старый дескриптор консоли
-    ); // Завершает восстановление вывода
-
-    CloseHandle(file); // Закрывает дескриптор файла
-
-    cout << "Output saved to console_log.txt\n"; // Сообщает пользователю о сохранении файла
-
-    pauseProgram(); // Ожидает нажатия клавиши и очищает экран
-}
-
-int main() // Главная функция, с которой начинается выполнение программы
-{
-    hIn = GetStdHandle(STD_INPUT_HANDLE); // Получает стандартный дескриптор ввода
-    hOut = GetStdHandle(STD_OUTPUT_HANDLE); // Получает стандартный дескриптор вывода
-
-    SetConsoleTitleA( // Устанавливает название окна консоли
-        "Win32 Console Control Center" // Текст заголовка
-    ); // Завершает установку заголовка
-
-    while (true) // Запускает бесконечный цикл главного меню
-    {
-        SetConsoleTextAttribute(hOut, 15); // Устанавливает белый цвет текста
-
-        cout << "========================================\n"; // Выводит верхнюю границу меню
-        cout << "       WIN32 CONSOLE CONTROL CENTER     \n"; // Выводит название программы
-        cout << "========================================\n"; // Выводит границу под названием
-        cout << "1. System Information\n"; // Пункт 1 — информация о системе
-        cout << "2. Cursor Control\n"; // Пункт 2 — управление курсором
-        cout << "3. Colors and Attributes\n"; // Пункт 3 — цвета и атрибуты
-        cout << "4. Screen Output\n"; // Пункт 4 — экранный буфер
-        cout << "5. CHAR_INFO\n"; // Пункт 5 — структура CHAR_INFO
-        cout << "6. Keyboard and Mouse Events\n"; // Пункт 6 — события клавиатуры и мыши
-        cout << "7. Input Buffer\n"; // Пункт 7 — входной буфер
-        cout << "8. High and Low Level I/O\n"; // Пункт 8 — высокий и низкий уровень I/O
-        cout << "9. New Screen Buffer\n"; // Пункт 9 — новый экранный буфер
-        cout << "A. Console Window\n"; // Пункт A — управление окном
-        cout << "B. Console Modes\n"; // Пункт B — режимы консоли
-        cout << "C. Redirect Output\n"; // Пункт C — перенаправление вывода
-        cout << "0. Exit\n"; // Пункт 0 — выход из программы
-        cout << "========================================\n"; // Выводит нижнюю границу меню
-        cout << "Select: "; // Просит пользователя выбрать пункт
-
-        char choice; // Создает переменную для выбора пользователя
-        cin >> choice; // Считывает выбранный символ
-
-        system("cls"); // Очищает экран перед выполнением выбранного пункта
-
-        switch (choice) // Проверяет выбранный пользователем пункт
-        {
-        case '1': // Если пользователь выбрал 1
-            info(); // Вызывает функцию информации о системе
-            break; // Завершает эту ветку switch
-
-        case '2': // Если пользователь выбрал 2
-            cursorControl(); // Вызывает функцию управления курсором
-            break; // Завершает эту ветку switch
-
-        case '3': // Если пользователь выбрал 3
-            colors(); // Вызывает функцию цветов и атрибутов
-            break; // Завершает эту ветку switch
-
-        case '4': // Если пользователь выбрал 4
-            screenOutput(); // Вызывает функцию работы с экранным буфером
-            break; // Завершает эту ветку switch
-
-        case '5': // Если пользователь выбрал 5
-            charInfoDemo(); // Вызывает демонстрацию CHAR_INFO
-            break; // Завершает эту ветку switch
-
-        case '6': // Если пользователь выбрал 6
-            events(); // Вызывает мониторинг событий
-            break; // Завершает эту ветку switch
-
-        case '7': // Если пользователь выбрал 7
-            inputBuffer(); // Вызывает работу с входным буфером
-            break; // Завершает эту ветку switch
-
-        case '8': // Если пользователь выбрал 8
-            ioDemo(); // Вызывает демонстрацию высокого и низкого I/O
-            break; // Завершает эту ветку switch
-
-        case '9': // Если пользователь выбрал 9
-            newBuffer(); // Создает и демонстрирует новый экранный буфер
-            break; // Завершает эту ветку switch
-
-        case 'A': // Если пользователь выбрал большую букву A
-        case 'a': // Если пользователь выбрал маленькую букву a
-            windowControl(); // Вызывает управление окном консоли
-            break; // Завершает эту ветку switch
-
-        case 'B': // Если пользователь выбрал большую букву B
-        case 'b': // Если пользователь выбрал маленькую букву b
-            modes(); // Вызывает функцию управления режимами консоли
-            break; // Завершает эту ветку switch
-
-        case 'C': // Если пользователь выбрал большую букву C
-        case 'c': // Если пользователь выбрал маленькую букву c
-            redirectOutput(); // Вызывает функцию перенаправления вывода
-            break; // Завершает эту ветку switch
-
-        case '0': // Если пользователь выбрал 0
-            SetConsoleTextAttribute(hOut, 7); // Возвращает стандартный цвет консоли
-            return 0; // Завершает программу с кодом успешного выполнения
-
-        default: // Если пользователь ввел неизвестную команду
-            cout << "Unknown command.\n"; // Выводит сообщение об ошибке
-            pauseProgram(); // Ожидает клавишу и очищает экран
+        case MOUSE_EVENT:
+            PrintMouseEvent(rec.Event.MouseEvent);
+            break;
+        default:
+            break;
         }
     }
+
+    SetConsoleMode(hIn, oldMode);
+    wprintf(L"\nВыход. Режим консоли восстановлен.\n");
+    return 0;
 }
