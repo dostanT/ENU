@@ -1,0 +1,58 @@
+@startuml
+!pragma layout smetana
+left to right direction
+skinparam shadowing false
+skinparam dpi 130
+skinparam defaultFontName Arial
+skinparam usecase {
+  BackgroundColor White
+  BorderColor Black
+}
+skinparam rectangle {
+  BackgroundColor White
+  BorderColor Black
+}
+title Процесс 1-AB «Продажа абонементов»
+
+actor "Клиент\n(киоск)" as Cl
+actor "Продавец\nабонементов" as Seller
+actor "Ресепшн" as Rec
+actor "Менеджер\nпо продажам" as Mgr
+actor "Банк\n(эквайринг)" as Bank
+
+Seller <|-- Rec
+Seller <|-- Mgr
+
+rectangle "Продажа абонементов (1-AB)" {
+  usecase "Просмотреть каталог\nабонементов" as U11
+  usecase "Выбрать абонемент\nи филиал" as U12
+  usecase "Проверить возможность\nактивации" as U13
+  usecase "Рассчитать стоимость" as U14
+  usecase "Применить скидку\nпо акции" as U18
+  usecase "Оплатить" as U15
+  usecase "Активировать абонемент\nи выпустить карту" as U16
+  usecase "Отменить абонемент\n(возврат)" as U17
+  usecase "Зарегистрировать\nклиента" as U19
+  usecase "Заморозить\nабонемент" as U110
+  usecase "Разморозить\nабонемент" as U111
+}
+
+Cl -- U11
+Cl -- U12
+Cl -- U13
+Cl -- U14
+Cl -- U15
+Seller -- U11
+Seller -- U12
+Seller -- U13
+Seller -- U14
+Seller -- U15
+Seller -- U17
+Seller -- U19
+Seller -- U110
+Seller -- U111
+U15 -- Bank
+U17 -- Bank
+U18 .> U14 : <<extend>>
+U15 .> U16 : <<include>>
+@enduml

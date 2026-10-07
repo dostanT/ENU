@@ -1,0 +1,31 @@
+@startuml
+!pragma layout smetana
+left to right direction
+skinparam shadowing false
+skinparam dpi 130
+skinparam defaultFontName Arial
+skinparam usecase {
+  BackgroundColor White
+  BorderColor Black
+}
+skinparam rectangle {
+  BackgroundColor White
+  BorderColor Black
+}
+title Процесс 4-POS «Учёт посещений»
+
+actor "Ресепшн" as Rec
+actor "Турникет\n(эмулятор)" as Turn
+
+rectangle "Учёт посещений (4-POS)" {
+  usecase "Пропустить клиента\nпо абонементу" as U41
+  usecase "Проверить абонемент" as U42
+  usecase "Зафиксировать отказ\nв проходе" as U43
+  usecase "Просмотреть историю\nпосещений клиента" as U44
+}
+
+Rec -- U44
+U41 -- Turn
+U41 .> U42 : <<include>>
+U43 .> U41 : <<extend>>
+@enduml

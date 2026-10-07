@@ -1,0 +1,36 @@
+@startuml
+!pragma layout smetana
+left to right direction
+skinparam shadowing false
+skinparam dpi 130
+skinparam defaultFontName Arial
+skinparam usecase {
+  BackgroundColor White
+  BorderColor Black
+}
+skinparam rectangle {
+  BackgroundColor White
+  BorderColor Black
+}
+title Процесс 5-ZAK «Закупка инвентаря и спортивного питания»
+
+actor "Кладовщик" as Stk
+
+rectangle "Закупка инвентаря и спортивного питания (5-ZAK)" {
+  usecase "Управлять товарами\nи поставщиками" as U51
+  usecase "Оформить заказ\nпоставщику" as U52
+  usecase "Принять поставку\nна склад" as U53
+  usecase "Продать товар\nв магазине" as U54
+  usecase "Списать товар по ФИФО" as U55
+  usecase "Просмотреть остатки" as U56
+  usecase "Показать товары\nс малым остатком" as U57
+}
+
+Stk -- U51
+Stk -- U52
+Stk -- U53
+Stk -- U54
+Stk -- U56
+U54 .> U55 : <<include>>
+U57 .> U56 : <<extend>>
+@enduml

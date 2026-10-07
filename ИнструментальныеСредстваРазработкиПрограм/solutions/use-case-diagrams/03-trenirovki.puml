@@ -1,0 +1,38 @@
+@startuml
+!pragma layout smetana
+left to right direction
+skinparam shadowing false
+skinparam dpi 130
+skinparam defaultFontName Arial
+skinparam usecase {
+  BackgroundColor White
+  BorderColor Black
+}
+skinparam rectangle {
+  BackgroundColor White
+  BorderColor Black
+}
+title Процесс 3-TRE «Проведение тренировок»
+
+actor "Тренер" as Tr
+actor "Ресепшн" as Rec
+actor "Директор сети" as Dir
+actor "Менеджер\nпо продажам" as Mgr
+
+rectangle "Проведение тренировок (3-TRE)" {
+  usecase "Просмотреть свой день" as U31
+  usecase "Отметить посещаемость\nзанятия" as U32
+  usecase "Записать клиента на\nперсональную тренировку" as U33
+  usecase "Проверить занятость\nтренера" as U34
+  usecase "Отметить проведение\nперсональной тренировки" as U35
+  usecase "Просмотреть нагрузку\nтренеров" as U36
+}
+
+Tr -- U31
+Tr -- U32
+Rec -- U33
+Tr -- U35
+U36 -- Dir
+U36 -- Mgr
+U33 .> U34 : <<include>>
+@enduml

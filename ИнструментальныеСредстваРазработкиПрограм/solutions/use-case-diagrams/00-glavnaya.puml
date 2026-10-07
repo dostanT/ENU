@@ -1,0 +1,88 @@
+@startuml
+!pragma layout smetana
+left to right direction
+skinparam shadowing false
+skinparam dpi 130
+skinparam defaultFontName Arial
+skinparam usecase {
+  BackgroundColor White
+  BorderColor Black
+}
+skinparam rectangle {
+  BackgroundColor White
+  BorderColor Black
+}
+title Главная диаграмма вариантов использования FitnessCRM
+
+actor "Сотрудник" as Staff
+actor "Директор сети" as Dir
+actor "Менеджер\nпо продажам" as Mgr
+actor "Ресепшн" as Rec
+actor "Тренер" as Tr
+actor "Кладовщик" as Stk
+actor "Бухгалтер" as Acc
+actor "Маркетолог" as Mkt
+actor "Администратор" as Adm
+actor "Клиент\n(киоск)" as Cl
+actor "Банк\n(эквайринг)" as Bank
+actor "Турникет" as Turn
+actor "Планировщик\n(время)" as Sched
+
+Staff <|-- Dir
+Staff <|-- Mgr
+Staff <|-- Rec
+Staff <|-- Tr
+Staff <|-- Stk
+Staff <|-- Acc
+Staff <|-- Mkt
+Staff <|-- Adm
+
+rectangle "FitnessCRM" {
+  usecase "Войти в систему" as U001
+  usecase "Управлять сотрудниками\nи ролями" as U002
+  usecase "Управлять видами\nабонементов и ценами" as U003
+  usecase "Продать абонемент" as U01
+  usecase "Отменить абонемент\n(возврат)" as U017
+  usecase "Заморозить абонемент" as U0110
+  usecase "Зарегистрировать клиента" as U019
+  usecase "Записать клиента\nна занятие" as U02
+  usecase "Создать занятие\nв расписании" as U025
+  usecase "Отметить посещаемость\nзанятия" as U03
+  usecase "Пропустить клиента\nпо абонементу" as U04
+  usecase "Оформить заказ\nпоставщику" as U052
+  usecase "Принять поставку\nна склад" as U053
+  usecase "Продать товар в магазине" as U054
+  usecase "Управлять акциями" as U06
+  usecase "Просмотреть финансовые\nотчёты" as U07
+  usecase "Просмотреть напоминания" as U081
+  usecase "Сформировать напоминания\nоб истечении абонемента" as U082
+}
+
+Staff -- U001
+Adm -- U002
+Dir -- U003
+Rec -- U01
+Mgr -- U01
+Cl -- U01
+Rec -- U017
+Mgr -- U017
+Rec -- U0110
+Rec -- U019
+Mgr -- U019
+Rec -- U02
+Mgr -- U025
+Tr -- U03
+Stk -- U052
+Stk -- U053
+Stk -- U054
+Mkt -- U06
+Dir -- U06
+Acc -- U07
+Dir -- U07
+Rec -- U081
+Mgr -- U081
+U01 -- Bank
+U017 -- Bank
+U04 -- Turn
+U082 -- Sched
+@enduml

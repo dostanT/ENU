@@ -1,0 +1,44 @@
+@startuml
+!pragma layout smetana
+left to right direction
+skinparam shadowing false
+skinparam dpi 130
+skinparam defaultFontName Arial
+skinparam usecase {
+  BackgroundColor White
+  BorderColor Black
+}
+skinparam rectangle {
+  BackgroundColor White
+  BorderColor Black
+}
+title Процесс 2-ZAP «Запись на групповые занятия»
+
+actor "Ресепшн" as Rec
+actor "Менеджер\nпо продажам" as Mgr
+actor "Тренер" as Tr
+
+rectangle "Запись на групповые занятия (2-ZAP)" {
+  usecase "Просмотреть расписание\nзанятий" as U21
+  usecase "Записать клиента\nна занятие" as U22
+  usecase "Проверить возможность\nзаписи" as U23
+  usecase "Подготовить подтверждение\nзаписи" as U83
+  usecase "Поставить клиента\nв лист ожидания" as U28
+  usecase "Отменить запись\nна занятие" as U24
+  usecase "Создать занятие\nв расписании" as U25
+  usecase "Проверить пересечение\nзанятий в зале" as U26
+  usecase "Управлять залами и\nвидами занятий" as U27
+}
+
+Rec -- U21
+Mgr -- U21
+Tr -- U21
+Rec -- U22
+Rec -- U24
+Mgr -- U25
+Mgr -- U27
+U22 .> U23 : <<include>>
+U22 .> U83 : <<include>>
+U28 .> U22 : <<extend>>
+U25 .> U26 : <<include>>
+@enduml

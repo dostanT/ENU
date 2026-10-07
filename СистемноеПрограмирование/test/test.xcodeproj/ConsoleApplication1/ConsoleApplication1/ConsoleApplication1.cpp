@@ -1,1044 +1,714 @@
-﻿// ============================================================================
-//  Банк "Ырыс" - Диспетчерская мониторинга банкоматов
-//  Мини-проект, охватывающий главы 9-17 (консольные приложения и передача
-//  данных между процессами) - сиквел к solutions/task2.md (главы 1-8, тот
-//  же банк, тот же общий стиль и приёмы: PrintLastError, критическая
-//  секция вокруг вывода, событие с ручным сбросом для завершения).
-//
-//  Роли одного и того же exe (роль выбирается argv[1] - диспетчер запускает
-//  сам себя повторно нужным аргументом через GetModuleFileName, см. main()
-//  и функции Spawn*):
-//
-//    (без аргументов)  - диспетчер: главный процесс, рисует дашборд на
-//                         консоли и принимает данные от трёх видов дочерних
-//                         процессов одновременно;
-//    agent <handle>    - датчик нагрузки: пишет в анонимный канал (15);
-//    branch            - отделение: обменивается данными через именованный
-//                         канал (16);
-//    atm <id>          - банкомат: шлёт сообщения в почтовый ящик (17).
-//
-//  Карточка каждого канала передачи данных (глава 14 - в самой главе нет
-//  функций Win32, только теория и словарь понятий; ниже он применён к трём
-//  реальным каналам этого проекта, как и просит книга при разборе канала):
-//
-//    Анонимный канал agent -> диспетчер (глава 15):
-//      имя: нет. Направление: полудуплекс, задаётся дескриптором (agent
-//      только пишет, диспетчер только читает). Передача: потоком байтов
-//      (сырая структура SensorReading, без разделителей сообщений). Обмен:
-//      синхронный (ReadFile блокирует поток-читатель, пока agent не
-//      напишет). Буферизация: ограниченная (dwSize у CreatePipe). Топология:
-//      1 -> 1. Один компьютер. Адресация: косвенная, через значение
-//      дескриптора, переданное в командной строке (способ явной передачи
-//      из главы 15 и главы 10 - второй способ, через STARTUPINFO.hStdInput/
-//      hStdOutput, в этом проекте не использован, см. пояснение внизу файла).
-//
-//    Именованный канал branch <-> диспетчер (глава 16):
-//      имя: "\\.\pipe\Bank_Iris_BranchPipe". Направление: дуплекс
-//      (PIPE_ACCESS_DUPLEX). Передача: сообщениями (PIPE_TYPE_MESSAGE).
-//      Обмен: синхронный. Буферизация: ограниченная. Топология: 1 -> 1
-//      (один экземпляр канала - одно отделение зараз). По природе -
-//      локальная сеть, здесь один компьютер ("."). Адресация: косвенная,
-//      по имени канала.
-//
-//    Почтовый ящик atm -> диспетчер (глава 17):
-//      имя: "\\.\mailslot\Bank_Iris_ATMAlerts". Направление: только от
-//      клиента к серверу - классическая топология этого механизма N -> 1
-//      (несколько банкоматов, один диспетчер). Передача: сообщениями.
-//      Обмен: синхронный с таймаутом ожидания (dwReadTimeout). Доставка не
-//      подтверждается. По природе - домен, здесь один компьютер. Адресация:
-//      косвенная, по имени ящика.
-//
-//  Сборка: Visual Studio, консольное приложение, Юникод (UNICODE/_UNICODE -
-//  настройка проекта по умолчанию), C++14 и новее. Весь текст - широкие
-//  строки (wchar_t, литералы L"..."), точка входа - wmain. Файл сохранён
-//  в UTF-8 с BOM, чтобы кириллица в литералах читалась правильно. Через
-//  каналы и почтовый ящик передаётся UTF-16, поэтому размеры в
-//  WriteFile/ReadFile считаются в байтах: число символов * sizeof(wchar_t).
-//
-//  Дополнительные заголовки: stdlib.h (_wtoi - разбор числовых аргументов
-//  командной строки), io.h и fcntl.h (_setmode - чтобы wcout выводил
-//  кириллицу в консоль). Это обычная библиотека C/C++, не Win32-специфика.
-//
-//  Проверено: собрано MSVC (Visual Studio 2026, x64) без ошибок и
-//  предупреждений, запущено - все три канала работают (датчик, отделение,
-//  три банкомата), диспетчер корректно закрывается.//
-// ============================================================================
+﻿#include <windows.h> // Подключает Windows API для работы с консолью, дескрипторами, событиями и буферами
+#include <iostream> // Подключает стандартный ввод и вывод: cin и cout
+#include <conio.h> // Подключает _getch() для ожидания нажатия клавиши
+#include <cstring> // Подключает функции работы со строками, например strlen()
 
-#include <windows.h>
-#include <iostream>
-#include <stdlib.h>   // _wtoi()
-#include <io.h>       // _setmode
-#include <fcntl.h>    // _O_U16TEXT
-using namespace std;
+using namespace std; // Позволяет использовать cout, cin и другие элементы без std::
 
-// ---------- Имена каналов ----------
+HANDLE hIn; // Глобальный дескриптор входной консоли
+HANDLE hOut; // Глобальный дескриптор выходной консоли
 
-#define BRANCH_PIPE_NAME   L"\\\\.\\pipe\\Bank_Iris_BranchPipe"
-#define ATM_MAILSLOT_NAME  L"\\\\.\\mailslot\\Bank_Iris_ATMAlerts"
-
-// ---------- Размеры и раскладка дашборда (глава 11, 12) ----------
-
-const int ATM_COUNT = 3;    // сколько банкоматов в сегменте сети
-const int AGENT_READINGS = 8;    // сколько показаний пришлёт датчик нагрузки
-
-const int BUF_COLS = 100;   // ширина буфера экрана диспетчера (холст)
-const int BUF_ROWS = 40;    // высота буфера экрана
-const int WIN_COLS = 90;    // ширина ОКНА - меньше буфера (11: окно <= буфера)
-const int WIN_ROWS = 25;
-
-const int ROW_TITLE = 0;
-const int ROW_BOARD = 3;          // строка табло банкоматов
-const int ROW_LOAD = 5;          // строка датчика нагрузки диспетчерской
-const int ROW_HINT = BUF_ROWS - 1;
-const int LOG_TOP = 7;          // первая строка прокручиваемого журнала
-const int LOG_BOTTOM = BUF_ROWS - 3;
-
-const int CELL_WIDTH = 14;   // ширина одной клетки табло банкомата
-
-// ---------- Общие ресурсы диспетчера ----------
-
-CRITICAL_SECTION g_csLog;        // защищает вывод в журнал и табло (6.1)
-HANDLE           g_hQuitEvent;   // "пора закрываться", ручной сброс (6.4)
-HANDLE           g_hStdOut;      // активный буфер экрана диспетчера
-HANDLE           g_hStdIn;       // входной буфер диспетчера
-HANDLE           g_hAgentRead;   // дескриптор ЧТЕНИЯ анонимного канала
-HANDLE           g_hMailslot;    // дескриптор почтового ящика (сервер)
-
-int  g_logRow = LOG_TOP;         // следующая свободная строка журнала
-wchar_t g_exePath[MAX_PATH];        // путь к собственному exe (для самозапуска)
-
-struct AtmCell
+void pauseProgram() // Функция ожидания нажатия клавиши
 {
-    int  state;          // 0 - нет данных, 1 - в норме, 2 - тревога
-    wchar_t lastMsg[64];    // текст последнего сообщения от банкомата
-};
-AtmCell g_atm[ATM_COUNT];
-
-DWORD g_agentLoad = 0;    // последнее показание датчика нагрузки (глава 15)
-
-// Данные, которые agent передаёт диспетчеру потоком байтов через
-// анонимный канал - сырая структура, а не текст (контраст с wcout,
-// про который прямо предупреждает глава 15: формат чтения должен
-// совпадать с форматом записи).
-struct SensorReading
-{
-    DWORD load;   // условная загрузка диспетчерской, %
-    DWORD tick;   // GetTickCount на момент замера
-};
-
-// ============================================================================
-//  Общие мелкие помощники
-// ============================================================================
-
-// Текст ошибки Win32 для ролей с ОБЫЧНОЙ консолью (branch, atm) - тот же
-// приём, что PrintLastError в task2.md (тема 3.6, CoutErrorMessage).
-void PrintLastError(const wchar_t* what)
-{
-    DWORD  err = GetLastError();
-    LPVOID lpMsgBuf;
-
-    FormatMessage(
-        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
-        FORMAT_MESSAGE_IGNORE_INSERTS,
-        NULL, err, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-        (LPTSTR)&lpMsgBuf, 0, NULL);
-
-    wcout << L"[ОШИБКА] " << what << L" (код " << err << L"): " << (wchar_t*)lpMsgBuf << endl;
-
-    LocalFree(lpMsgBuf);
+    cout << "\nPress any key..."; // Выводит сообщение пользователю
+    _getch(); // Ждет нажатия любой клавиши без Enter
+    system("cls"); // Очищает экран консоли
 }
 
-// Путь к собственному exe - понадобится всем трём Spawn*(), чтобы диспетчер
-// мог запускать САМ СЕБЯ с другой ролью в командной строке. GetModuleFileName -
-// обычная (не из глав 9-17) функция Win32 для получения пути к своему
-// модулю, тот же приём переиспользования, что DuplicateHandle/CreateProcess
-// из главы 4 в task2.md.
-void BuildExePath()
+void info() // Функция вывода информации о консоли
 {
-    if (GetModuleFileName(NULL, g_exePath, MAX_PATH) == 0)
-    {
-        PrintLastError(L"GetModuleFileName");
-        lstrcpy(g_exePath, L"dispatcher.exe");   // крайний случай, не должен случиться
-    }
+    CONSOLE_SCREEN_BUFFER_INFO s; // Структура для хранения информации об экранном буфере
+    DWORD inputMode, outputMode, mouseButtons; // Переменные для режимов консоли и количества кнопок мыши
+    COORD maxSize; // Переменная для хранения максимального размера окна
+
+    GetConsoleScreenBufferInfo(hOut, &s); // Получает информацию об экранном буфере
+    GetConsoleMode(hIn, &inputMode); // Получает текущий режим входной консоли
+    GetConsoleMode(hOut, &outputMode); // Получает текущий режим выходной консоли
+    GetNumberOfConsoleMouseButtons(&mouseButtons); // Получает количество кнопок мыши
+    maxSize = GetLargestConsoleWindowSize(hOut); // Получает максимально возможный размер окна
+
+    cout << "===== SYSTEM INFORMATION =====\n\n"; // Выводит заголовок раздела
+
+    cout << "Window: " // Выводит название параметра окна
+        << s.srWindow.Right - s.srWindow.Left + 1 << " x " // Вычисляет ширину видимого окна
+        << s.srWindow.Bottom - s.srWindow.Top + 1 << "\n"; // Вычисляет высоту видимого окна
+
+    cout << "Buffer: " // Выводит название параметра буфера
+        << s.dwSize.X << " x " << s.dwSize.Y << "\n"; // Выводит ширину и высоту экранного буфера
+
+    cout << "Cursor: " // Выводит название параметра курсора
+        << s.dwCursorPosition.X << ", " // Выводит координату X курсора
+        << s.dwCursorPosition.Y << "\n"; // Выводит координату Y курсора
+
+    cout << "Largest window: " // Выводит название максимального размера
+        << maxSize.X << " x " << maxSize.Y << "\n"; // Выводит максимальную ширину и высоту окна
+
+    cout << "Mouse buttons: " << mouseButtons << "\n"; // Выводит количество кнопок мыши
+    cout << "Input mode: " << inputMode << "\n"; // Выводит режим входной консоли
+    cout << "Output mode: " << outputMode << "\n"; // Выводит режим выходной консоли
+
+    pauseProgram(); // Ожидает нажатия клавиши и очищает экран
 }
 
-// ============================================================================
-//  Дашборд диспетчера: журнал с прокруткой (глава 13)
-// ============================================================================
-
-// ScrollConsoleScreenBuffer, ОГРАНИЧЕННЫЙ областью журнала через
-// lpClipRectangle - в примере книги (GoToNewLine) прокручивается весь
-// буфер целиком, здесь - только строки LOG_TOP..LOG_BOTTOM, чтобы табло и
-// заголовок наверху не съезжали вместе с журналом.
-void ScrollLogUp()
+void cursorControl() // Функция управления курсором
 {
-    SMALL_RECT srScroll;
-    srScroll.Left = 0; srScroll.Top = (SHORT)(LOG_TOP + 1);
-    srScroll.Right = (SHORT)(BUF_COLS - 1); srScroll.Bottom = (SHORT)LOG_BOTTOM;
+    CONSOLE_CURSOR_INFO cursorInfo; // Структура для хранения информации о курсоре
+    CONSOLE_SCREEN_BUFFER_INFO screenInfo; // Структура для хранения информации об экранном буфере
 
-    SMALL_RECT srClip;
-    srClip.Left = 0; srClip.Top = (SHORT)LOG_TOP;
-    srClip.Right = (SHORT)(BUF_COLS - 1); srClip.Bottom = (SHORT)LOG_BOTTOM;
+    GetConsoleCursorInfo(hOut, &cursorInfo); // Получает текущие параметры курсора
+    GetConsoleScreenBufferInfo(hOut, &screenInfo); // Получает информацию об экранном буфере
 
-    COORD coordDest;
-    coordDest.X = 0; coordDest.Y = (SHORT)LOG_TOP;
+    cout << "===== CURSOR CONTROL =====\n\n"; // Выводит заголовок раздела
 
-    CHAR_INFO fill;
-    fill.Char.UnicodeChar = L' ';
-    fill.Attributes = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE;
+    cout << "Cursor size: " // Выводит размер курсора
+        << cursorInfo.dwSize << "%\n"; // Показывает размер курсора в процентах
 
-    if (!ScrollConsoleScreenBuffer(g_hStdOut, &srScroll, &srClip, coordDest, &fill))
-        PrintLastError(L"ScrollConsoleScreenBuffer");
+    cout << "Visible: " // Выводит информацию о видимости курсора
+        << (cursorInfo.bVisible ? "YES" : "NO") << "\n"; // Если курсор видим — YES, иначе NO
+
+    COORD position = { 5, 5 }; // Создает координаты X=5 и Y=5
+
+    SetConsoleCursorPosition(hOut, position); // Перемещает курсор в позицию 5,5
+
+    cout << "Cursor moved using Win32 API"; // Выводит текст в новой позиции курсора
+
+    CONSOLE_CURSOR_INFO hiddenCursor = cursorInfo; // Создает копию исходных параметров курсора
+    hiddenCursor.dwSize = 100; // Устанавливает размер курсора 100 процентов
+    hiddenCursor.bVisible = FALSE; // Делает курсор невидимым
+
+    SetConsoleCursorInfo(hOut, &hiddenCursor); // Применяет новые параметры курсора
+
+    Sleep(700); // Приостанавливает программу на 700 миллисекунд
+
+    SetConsoleCursorInfo(hOut, &cursorInfo); // Восстанавливает исходные параметры курсора
+    SetConsoleCursorPosition(hOut, screenInfo.dwCursorPosition); // Возвращает курсор на исходную позицию
+
+    pauseProgram(); // Ожидает нажатия клавиши и очищает экран
 }
 
-// Строка журнала: источник события + сам текст. Пишется через
-// WriteConsole (высокий уровень, глава 13), с прокруткой, когда область
-// журнала заполнена. Единственная точка вывода дашборда, защищённая
-// критической секцией - без неё три потока-читателя каналов (глава 15-17)
-// писали бы в консоль одновременно и портили бы друг другу строки.
-void Log(const wchar_t* src, const wchar_t* msg)
+void colors() // Функция демонстрации цветов и атрибутов
 {
-    EnterCriticalSection(&g_csLog);
+    DWORD written; // Переменная для количества записанных атрибутов
+    WORD attributes[10]; // Массив из 10 атрибутов цветов
 
-    wchar_t line[BUF_COLS + 1];
-    wsprintf(line, L"[%-9s] %s", src, msg);
+    cout << "===== COLORS AND ATTRIBUTES =====\n\n"; // Выводит заголовок раздела
 
-    if (g_logRow > LOG_BOTTOM)
-    {
-        ScrollLogUp();
-        g_logRow = LOG_BOTTOM;
-    }
+    SetConsoleTextAttribute(hOut, 10); // Устанавливает зеленый цвет текста
+    cout << "GREEN  - system message\n"; // Выводит сообщение зеленым цветом
 
-    COORD coord;
-    coord.X = 0; coord.Y = (SHORT)g_logRow;
+    SetConsoleTextAttribute(hOut, 11); // Устанавливает голубой цвет текста
+    cout << "CYAN   - information\n"; // Выводит сообщение голубым цветом
 
-    DWORD written;
-    FillConsoleOutputCharacter(g_hStdOut, ' ', BUF_COLS, coord, &written);  // стереть старое
-    SetConsoleCursorPosition(g_hStdOut, coord);
-    WriteConsole(g_hStdOut, line, lstrlen(line), &written, NULL);
+    SetConsoleTextAttribute(hOut, 14); // Устанавливает желтый цвет текста
+    cout << "YELLOW - warning\n"; // Выводит сообщение желтым цветом
 
-    g_logRow++;
+    SetConsoleTextAttribute(hOut, 12); // Устанавливает красный цвет текста
+    cout << "RED    - alert\n"; // Выводит сообщение красным цветом
 
-    LeaveCriticalSection(&g_csLog);
+    SetConsoleTextAttribute(hOut, 15); // Возвращает белый цвет текста
+
+    FillConsoleOutputAttribute( // Заполняет указанную область определенным атрибутом
+        hOut, // Дескриптор экранного буфера
+        9, // Атрибут цвета
+        10, // Количество позиций для изменения
+        { 0, 8 }, // Начальная координата X=0, Y=8
+        &written // Переменная для количества обработанных позиций
+    ); // Завершает вызов функции
+
+    for (int i = 0; i < 10; i++) // Цикл проходит по 10 элементам массива
+        attributes[i] = 15; // Устанавливает белый атрибут каждому элементу
+
+    WriteConsoleOutputAttribute( // Записывает атрибуты в экранный буфер
+        hOut, // Дескриптор экранного буфера
+        attributes, // Массив атрибутов
+        10, // Количество атрибутов
+        { 0, 8 }, // Начальная координата
+        &written // Количество записанных атрибутов
+    ); // Завершает вызов функции
+
+    ReadConsoleOutputAttribute( // Считывает атрибуты из экранного буфера
+        hOut, // Дескриптор экранного буфера
+        attributes, // Массив для сохранения прочитанных атрибутов
+        10, // Количество атрибутов
+        { 0, 8 }, // Начальная координата чтения
+        &written // Количество прочитанных атрибутов
+    ); // Завершает вызов функции
+
+    cout << "\nFirst attribute: " // Выводит название первого атрибута
+        << attributes[0] << "\n"; // Выводит значение первого атрибута
+
+    pauseProgram(); // Ожидает нажатия клавиши и очищает экран
 }
 
-// ============================================================================
-//  Дашборд диспетчера: табло банкоматов и датчик нагрузки (глава 12, 13)
-// ============================================================================
-
-// Одна клетка табло: цвет через FillConsoleOutputAttribute (глава 12,
-// красит УЖЕ существующие клетки, не трогая символы), текст через
-// WriteConsoleOutputCharacter (глава 13, пишет в клетку, не двигая курсор).
-void DrawAtmCell(int index)
+void screenOutput() // Функция работы с экранным буфером
 {
-    COORD coord;
-    coord.X = (SHORT)(index * CELL_WIDTH); coord.Y = (SHORT)ROW_BOARD;
+    DWORD written; // Переменная для количества записанных символов
+    DWORD read; // Переменная для количества прочитанных символов
+    char text[30] = {}; // Создает буфер для хранения прочитанного текста
 
-    WORD attr;
-    const wchar_t* mark;
-    switch (g_atm[index].state)
-    {
-    case 2:
-        attr = BACKGROUND_RED | BACKGROUND_INTENSITY |
-            FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY;
-        mark = L"!!!";
-        break;
-    case 1:
-        attr = BACKGROUND_GREEN |
-            FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY;
-        mark = L"ok";
-        break;
-    default:
-        attr = BACKGROUND_BLUE | FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE;
-        mark = L"...";
-        break;
-    }
+    cout << "===== SCREEN BUFFER =====\n\n"; // Выводит заголовок раздела
 
-    wchar_t label[CELL_WIDTH + 1];
-    wsprintf(label, L" ATM %-2d %-4s", index + 1, mark);
+    const char* message = "WIN32 SCREEN BUFFER"; // Создает строку для записи в экранный буфер
 
-    DWORD written;
-    FillConsoleOutputAttribute(g_hStdOut, attr, CELL_WIDTH, coord, &written);
-    WriteConsoleOutputCharacter(g_hStdOut, label, lstrlen(label), coord, &written);
+    WriteConsoleOutputCharacterA( // Записывает символы непосредственно в экранный буфер
+        hOut, // Дескриптор экранного буфера
+        message, // Текст для записи
+        static_cast<DWORD>(strlen(message)), // Вычисляет длину строки
+        { 5, 5 }, // Координата начала записи
+        &written // Количество записанных символов
+    ); // Завершает вызов функции
+
+    FillConsoleOutputCharacterA( // Заполняет указанную область одним символом
+        hOut, // Дескриптор экранного буфера
+        '*', // Символ для заполнения
+        25, // Количество символов
+        { 5, 7 }, // Начальная координата
+        &written // Количество записанных символов
+    ); // Завершает вызов функции
+
+    ReadConsoleOutputCharacterA( // Читает символы непосредственно из экранного буфера
+        hOut, // Дескриптор экранного буфера
+        text, // Буфер для сохранения прочитанного текста
+        static_cast<DWORD>(strlen(message)), // Количество символов для чтения
+        { 5, 5 }, // Координата начала чтения
+        &read // Количество прочитанных символов
+    ); // Завершает вызов функции
+
+    cout << "\nRead from screen: "; // Выводит сообщение перед прочитанным текстом
+    cout.write(text, read); // Выводит прочитанное количество символов
+    cout << "\n"; // Переходит на новую строку
+
+    pauseProgram(); // Ожидает нажатия клавиши и очищает экран
 }
 
-void DrawAllAtmCells()
+void charInfoDemo() // Функция демонстрации структуры CHAR_INFO
 {
-    for (int i = 0; i < ATM_COUNT; ++i)
-        DrawAtmCell(i);
+    CHAR_INFO data[25]; // Массив из 25 элементов для записи символов
+    CHAR_INFO result[25]; // Массив из 25 элементов для чтения символов
+
+    SMALL_RECT area = { 5, 5, 9, 9 }; // Задает прямоугольную область 5x5
+    COORD size = { 5, 5 }; // Задает размер области 5x5
+    COORD zero = { 0, 0 }; // Задает начальную координату источника
+
+    for (int i = 0; i < 25; i++) // Цикл заполняет все 25 элементов
+    {
+        data[i].Char.AsciiChar = (i % 2) ? '.' : '#'; // Чередует символы точки и решетки
+        data[i].Attributes = 11; // Устанавливает атрибут цвета 11
+    } // Завершает цикл заполнения массива
+
+    cout << "===== CHAR_INFO =====\n\n"; // Выводит заголовок раздела
+
+    WriteConsoleOutputA( // Записывает массив CHAR_INFO в экранный буфер
+        hOut, // Дескриптор экранного буфера
+        data, // Массив символов и атрибутов
+        size, // Размер записываемой области
+        zero, // Начальная координата источника
+        &area // Область назначения
+    ); // Завершает вызов функции
+
+    ReadConsoleOutputA( // Читает данные из экранного буфера
+        hOut, // Дескриптор экранного буфера
+        result, // Массив для сохранения результата
+        size, // Размер читаемой области
+        zero, // Начальная координата
+        &area // Область чтения
+    ); // Завершает вызов функции
+
+    cout << "\nCHAR_INFO area was written and read.\n"; // Сообщает о завершении записи и чтения
+
+    pauseProgram(); // Ожидает нажатия клавиши и очищает экран
 }
 
-void DrawLoad()
+void events() // Функция обработки событий консоли
 {
-    wchar_t  line[64];
-    wsprintf(line, L"Нагрузка диспетчерской: %d%%       ", g_agentLoad);
+    DWORD oldMode; // Переменная для сохранения старого режима консоли
+    DWORD read; // Переменная для количества прочитанных событий
+    INPUT_RECORD record; // Структура для хранения одного события
 
-    COORD coord;
-    coord.X = 0; coord.Y = (SHORT)ROW_LOAD;
+    GetConsoleMode(hIn, &oldMode); // Получает текущий режим входной консоли
 
-    DWORD written;
-    SetConsoleCursorPosition(g_hStdOut, coord);
-    WriteConsole(g_hStdOut, line, lstrlen(line), &written, NULL);
-}
+    DWORD newMode = oldMode; // Создает копию старого режима для изменения
 
-// ============================================================================
-//  Заставка через второй буфер экрана - двойная буферизация (глава 12)
-// ============================================================================
+    newMode |= ENABLE_MOUSE_INPUT; // Включает обработку событий мыши
+    newMode |= ENABLE_WINDOW_INPUT; // Включает события изменения размера окна
+    newMode |= ENABLE_EXTENDED_FLAGS; // Включает расширенные флаги консоли
+    newMode &= ~ENABLE_QUICK_EDIT_MODE; // Отключает режим Quick Edit
+    newMode &= ~ENABLE_LINE_INPUT; // Отключает построчный ввод
+    newMode &= ~ENABLE_ECHO_INPUT; // Отключает отображение вводимых символов
 
-void ShowSplash()
-{
-    HANDLE hSplash = CreateConsoleScreenBuffer(
-        GENERIC_READ | GENERIC_WRITE, 0, NULL, CONSOLE_TEXTMODE_BUFFER, NULL);
-    if (hSplash == INVALID_HANDLE_VALUE)
+    SetConsoleMode(hIn, newMode); // Применяет новый режим консоли
+
+    cout << "===== EVENT MONITOR =====\n\n"; // Выводит заголовок мониторинга событий
+    cout << "Press Q to exit.\n\n"; // Сообщает, что Q завершает мониторинг
+
+    while (true) // Запускает бесконечный цикл обработки событий
     {
-        PrintLastError(L"CreateConsoleScreenBuffer (заставка)");
-        return;
-    }
+        ReadConsoleInput(hIn, &record, 1, &read); // Читает одно событие из входного буфера
 
-    SetConsoleTextAttribute(hSplash,
-        BACKGROUND_BLUE | BACKGROUND_INTENSITY |
-        FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY);
-
-    DWORD written;
-    COORD coord;
-
-    coord.X = 2; coord.Y = 2;
-    wchar_t title1[] = L"БАНК \"ЫРЫС\"";
-    SetConsoleCursorPosition(hSplash, coord);
-    WriteConsole(hSplash, title1, lstrlen(title1), &written, NULL);
-
-    coord.X = 2; coord.Y = 4;
-    wchar_t title2[] = L"Диспетчерская мониторинга банкоматов";
-    SetConsoleCursorPosition(hSplash, coord);
-    WriteConsole(hSplash, title2, lstrlen(title2), &written, NULL);
-
-    coord.X = 2; coord.Y = 6;
-    wchar_t title3[] = L"Поднимаю каналы связи...";
-    SetConsoleCursorPosition(hSplash, coord);
-    WriteConsole(hSplash, title3, lstrlen(title3), &written, NULL);
-
-    if (!SetConsoleActiveScreenBuffer(hSplash))
-        PrintLastError(L"SetConsoleActiveScreenBuffer (заставка)");
-
-    Sleep(1200);
-
-    if (!SetConsoleActiveScreenBuffer(g_hStdOut))
-        PrintLastError(L"SetConsoleActiveScreenBuffer (возврат к дашборду)");
-
-    CloseHandle(hSplash);
-}
-
-// ============================================================================
-//  Настройка консоли и окна диспетчера (глава 11, 12, 13)
-// ============================================================================
-
-BOOL SetupDispatcherConsole()
-{
-    if (!SetConsoleTitle(L"Банк \"Ырыс\" - Диспетчерская мониторинга"))
-        PrintLastError(L"SetConsoleTitle");
-
-    g_hStdOut = GetStdHandle(STD_OUTPUT_HANDLE);
-    g_hStdIn = GetStdHandle(STD_INPUT_HANDLE);
-    if (g_hStdOut == INVALID_HANDLE_VALUE || g_hStdIn == INVALID_HANDLE_VALUE)
-    {
-        PrintLastError(L"GetStdHandle");
-        return FALSE;
-    }
-
-    // Сначала увеличиваем буфер (холст), только потом окно (глава 11:
-    // окно никогда не больше буфера - порядок именно поэтому такой).
-    COORD bufSize;
-    bufSize.X = (SHORT)BUF_COLS; bufSize.Y = (SHORT)BUF_ROWS;
-    if (!SetConsoleScreenBufferSize(g_hStdOut, bufSize))
-        PrintLastError(L"SetConsoleScreenBufferSize");
-
-    SMALL_RECT winRect;
-    winRect.Left = 0; winRect.Top = 0;
-    winRect.Right = (SHORT)(WIN_COLS - 1); winRect.Bottom = (SHORT)(WIN_ROWS - 1);
-    if (!SetConsoleWindowInfo(g_hStdOut, TRUE, &winRect))
-        PrintLastError(L"SetConsoleWindowInfo");
-
-    // Остальная часть главы 11: узнаём максимально возможный размер окна
-    // и читаем заголовок обратно, чтобы убедиться, что он правда встал.
-    COORD maxWin = GetLargestConsoleWindowSize(g_hStdOut);
-    if (maxWin.X == 0 && maxWin.Y == 0)
-        PrintLastError(L"GetLargestConsoleWindowSize");
-    else if (maxWin.X < WIN_COLS || maxWin.Y < WIN_ROWS)
-        Log(L"СИСТЕМА", L"экран мельче, чем нужно дашборду - часть текста может не влезть");
-
-    wchar_t  titleBuf[128];
-    DWORD titleLen = GetConsoleTitle(titleBuf, _countof(titleBuf));
-    if (titleLen == 0)
-        PrintLastError(L"GetConsoleTitle");
-
-    HWND hWnd = GetConsoleWindow();
-    if (hWnd == NULL)
-        Log(L"СИСТЕМА", L"GetConsoleWindow не нашёл окно (нужны Windows 2000/XP)");
-
-    CONSOLE_CURSOR_INFO cci;
-    cci.dwSize = 25;
-    cci.bVisible = TRUE;
-    if (!SetConsoleCursorInfo(g_hStdOut, &cci))
-        PrintLastError(L"SetConsoleCursorInfo");
-
-    // Низкоуровневый ввод: без построчного режима и без эха - события
-    // разбираем сами через ReadConsoleInput; окно и мышь - тоже приложению.
-    DWORD dwMode;
-    if (!GetConsoleMode(g_hStdIn, &dwMode))
-        PrintLastError(L"GetConsoleMode");
-    dwMode &= ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT);
-    dwMode |= ENABLE_WINDOW_INPUT | ENABLE_MOUSE_INPUT;
-    // ENABLE_QUICK_EDIT_MODE и ENABLE_EXTENDED_FLAGS не описаны в этой
-    // главе книги (общее знание Win32, помечено отдельно): по умолчанию
-    // QuickEdit включён и перехватывает клик мыши под выделение текста,
-    // тогда MOUSE_EVENT в приложение вообще не попадёт - отключаем явно.
-    dwMode |= ENABLE_EXTENDED_FLAGS;
-    dwMode &= ~ENABLE_QUICK_EDIT_MODE;
-    if (!SetConsoleMode(g_hStdIn, dwMode))
-        PrintLastError(L"SetConsoleMode");
-
-    return TRUE;
-}
-
-void DrawDashboardChrome()
-{
-    DWORD written;
-    COORD zero;
-    zero.X = 0; zero.Y = (SHORT)ROW_TITLE;
-
-    WORD titleAttr = BACKGROUND_BLUE | BACKGROUND_INTENSITY |
-        FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY;
-    FillConsoleOutputAttribute(g_hStdOut, titleAttr, BUF_COLS, zero, &written);
-    SetConsoleTextAttribute(g_hStdOut, titleAttr);
-
-    wchar_t title[] = L" БАНК \"ЫРЫС\" - ДИСПЕТЧЕРСКАЯ МОНИТОРИНГА ";
-    SetConsoleCursorPosition(g_hStdOut, zero);
-    WriteConsole(g_hStdOut, title, lstrlen(title), &written, NULL);
-
-    SetConsoleTextAttribute(g_hStdOut, FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE);
-
-    COORD c;
-    c.X = 0; c.Y = 2;
-    wchar_t boardLabel[] = L"Табло банкоматов:";
-    SetConsoleCursorPosition(g_hStdOut, c);
-    WriteConsole(g_hStdOut, boardLabel, lstrlen(boardLabel), &written, NULL);
-
-    DrawAllAtmCells();
-    DrawLoad();
-
-    c.X = 0; c.Y = (SHORT)(LOG_TOP - 1);
-    wchar_t logLabel[] = L"Журнал событий:";
-    SetConsoleCursorPosition(g_hStdOut, c);
-    WriteConsole(g_hStdOut, logLabel, lstrlen(logLabel), &written, NULL);
-
-    c.X = 0; c.Y = (SHORT)ROW_HINT;
-    wchar_t hint[] = L"Q-выход  C-очистить журнал  ЛКМ по табло-подробности о банкомате";
-    SetConsoleCursorPosition(g_hStdOut, c);
-    WriteConsole(g_hStdOut, hint, lstrlen(hint), &written, NULL);
-}
-
-// ============================================================================
-//  Датчик нагрузки: анонимный канал agent -> диспетчер (глава 15)
-// ============================================================================
-
-// Запуск датчика: дескриптор ЗАПИСИ передаём наследуемым дубликатом через
-// командную строку (листинг 15.2 книги, приём предпочтён дуплексному
-// варианту с двумя наследуемыми дескрипторами из листинга 15.4, потому что
-// здесь канал полудуплексный и нужен только один дескриптор у потомка).
-BOOL SpawnAgent()
-{
-    HANDLE hRead, hWrite, hInheritWrite;
-
-    if (!CreatePipe(&hRead, &hWrite, NULL, 0))
-    {
-        PrintLastError(L"CreatePipe (agent)");
-        return FALSE;
-    }
-    g_hAgentRead = hRead;   // остаётся ненаследуемым - виден только диспетчеру
-
-    if (!DuplicateHandle(GetCurrentProcess(), hWrite, GetCurrentProcess(),
-        &hInheritWrite, 0, TRUE, DUPLICATE_SAME_ACCESS))
-    {
-        PrintLastError(L"DuplicateHandle (agent write)");
-        CloseHandle(hWrite);
-        return FALSE;
-    }
-    CloseHandle(hWrite);   // ненаследуемый оригинал больше не нужен
-
-    wchar_t cmdLine[MAX_PATH + 32];
-    wsprintf(cmdLine, L"\"%s\" agent %u", g_exePath, (unsigned)(UINT_PTR)hInheritWrite);
-
-    STARTUPINFO         si;
-    PROCESS_INFORMATION pi;
-    ZeroMemory(&si, sizeof(si));
-    si.cb = sizeof(si);
-
-    // DETACHED_PROCESS (глава 10): у датчика нет и не будет собственной
-    // консоли - она ему не нужна, он только пишет в канал и завершается.
-    if (!CreateProcess(NULL, cmdLine, NULL, NULL, TRUE,
-        DETACHED_PROCESS, NULL, NULL, &si, &pi))
-    {
-        PrintLastError(L"CreateProcess (agent)");
-        CloseHandle(hInheritWrite);
-        return FALSE;
-    }
-    CloseHandle(hInheritWrite);   // копия ушла ребёнку, здесь она больше не нужна
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-
-    return TRUE;
-}
-
-// Поток-читатель: ReadFile блокируется, пока agent не пришлёт очередное
-// показание (обмен синхронный, глава 14) - поэтому читает в отдельном
-// потоке, а не в главном цикле, который занят вводом с консоли.
-DWORD WINAPI AgentReaderThread(LPVOID)
-{
-    SensorReading r;
-    DWORD         n;
-
-    for (;;)
-    {
-        if (!ReadFile(g_hAgentRead, &r, sizeof(r), &n, NULL) || n == 0)
-            break;   // канал закрыт (agent закончил или диспетчер завершается)
-
-        g_agentLoad = r.load;
-
-        EnterCriticalSection(&g_csLog);
-        DrawLoad();
-        LeaveCriticalSection(&g_csLog);
-
-        wchar_t msg[64];
-        wsprintf(msg, L"показание: нагрузка %d%% (тик %u)", r.load, r.tick);
-        Log(L"ДАТЧИК", msg);
-    }
-
-    return 0;
-}
-
-// ============================================================================
-//  Отделение: именованный канал branch <-> диспетчер (глава 16)
-// ============================================================================
-
-BOOL SpawnBranch()
-{
-    wchar_t cmdLine[MAX_PATH + 16];
-    wsprintf(cmdLine, L"\"%s\" branch", g_exePath);
-
-    STARTUPINFO         si;
-    PROCESS_INFORMATION pi;
-    ZeroMemory(&si, sizeof(si));
-    si.cb = sizeof(si);
-
-    // Ни CREATE_NEW_CONSOLE, ни DETACHED_PROCESS не указаны - по умолчанию
-    // консольный потомок делит консоль родителя (глава 10, п. 1). Это
-    // сделано НАРОЧНО, а не по недосмотру: несколько строк branch появятся
-    // прямо в консоли диспетчера вперемешку с журналом - так на практике и
-    // выглядит поведение по умолчанию, отличное от agent (нет консоли) и
-    // atm (совсем новая консоль) ниже.
-    if (!CreateProcess(NULL, cmdLine, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
-    {
-        PrintLastError(L"CreateProcess (branch)");
-        return FALSE;
-    }
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    return TRUE;
-}
-
-// Сервер именованного канала - целиком в отдельном потоке, потому что
-// ConnectNamedPipe блокирует вызывающий поток, пока не подключится клиент
-// (глава 16 прямо советует не делать это в главном потоке).
-DWORD WINAPI NamedPipeServerThread(LPVOID)
-{
-    HANDLE h = CreateNamedPipe(
-        BRANCH_PIPE_NAME,
-        PIPE_ACCESS_DUPLEX,
-        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
-        1,           // один экземпляр - одно отделение зараз
-        512, 512,    // размеры буферов - только пожелание системе
-        5000,        // таймаут по умолчанию для клиентского WaitNamedPipe
-        NULL);
-
-    if (h == INVALID_HANDLE_VALUE)
-    {
-        PrintLastError(L"CreateNamedPipe");
-        return 1;
-    }
-
-    BOOL connected = ConnectNamedPipe(h, NULL);
-    if (!connected && GetLastError() != ERROR_PIPE_CONNECTED)
-    {
-        PrintLastError(L"ConnectNamedPipe");
-        CloseHandle(h);
-        return 1;
-    }
-
-    DWORD lpFlags, outSize, inSize, maxInst;
-    if (GetNamedPipeInfo(h, &lpFlags, &outSize, &inSize, &maxInst))
-    {
-        wchar_t msg[96];
-        wsprintf(msg, L"отделение подключилось (буферы %d/%d байт, экземпляров max %d)",
-            outSize, inSize, maxInst);
-        Log(L"ФИЛИАЛ", msg);
-    }
-    else
-    {
-        PrintLastError(L"GetNamedPipeInfo");
-    }
-
-    wchar_t  buf[256];
-    DWORD n;
-    if (ReadFile(h, buf, sizeof(buf) - sizeof(wchar_t), &n, NULL))
-    {
-        buf[n / sizeof(wchar_t)] = L'\0';
-        Log(L"ФИЛИАЛ", buf);
-
-        wchar_t reply[] = L"Диспетчер: отчёт принят, отделение на связи.";
-        if (!WriteFile(h, reply, (lstrlen(reply) + 1) * sizeof(wchar_t), &n, NULL))
-            PrintLastError(L"WriteFile (ответ отделению)");
-    }
-    else
-    {
-        PrintLastError(L"ReadFile (branch pipe)");
-    }
-
-    if (!DisconnectNamedPipe(h))
-        PrintLastError(L"DisconnectNamedPipe");
-    CloseHandle(h);
-
-    Log(L"ФИЛИАЛ", L"сеанс завершён, канал закрыт");
-    return 0;
-}
-
-// ============================================================================
-//  Банкоматы: почтовый ящик atm -> диспетчер (глава 17)
-// ============================================================================
-
-BOOL CreateAtmMailslot()
-{
-    g_hMailslot = CreateMailslot(ATM_MAILSLOT_NAME, 0, 200, NULL);
-    if (g_hMailslot == INVALID_HANDLE_VALUE)
-    {
-        PrintLastError(L"CreateMailslot");
-        return FALSE;
-    }
-    return TRUE;
-}
-
-BOOL SpawnAtm(int id, int posX, int posY)
-{
-    wchar_t cmdLine[MAX_PATH + 16];
-    wsprintf(cmdLine, L"\"%s\" atm %d", g_exePath, id);
-
-    wchar_t title[32];
-    wsprintf(title, L"Банкомат №%d", id);
-
-    STARTUPINFO         si;
-    PROCESS_INFORMATION pi;
-    ZeroMemory(&si, sizeof(si));
-    si.cb = sizeof(si);
-
-    // Собственная, отдельная консоль с заданными положением/размером/
-    // заголовком/цветом (глава 10) - каждое поле учитывается ТОЛЬКО при
-    // поднятом соответствующем флаге в dwFlags, отсюда столько флагов.
-    si.lpTitle = title;
-    si.dwX = posX;
-    si.dwY = posY;
-    si.dwXSize = 320;
-    si.dwYSize = 160;
-    si.dwXCountChars = 50;
-    si.dwYCountChars = 10;
-    si.dwFillAttribute = FOREGROUND_GREEN | FOREGROUND_INTENSITY;
-    si.wShowWindow = SW_SHOWNORMAL;
-    si.dwFlags = STARTF_USEPOSITION | STARTF_USESIZE | STARTF_USECOUNTCHARS |
-        STARTF_USEFILLATTRIBUTE | STARTF_USESHOWWINDOW;
-
-    if (!CreateProcess(NULL, cmdLine, NULL, NULL, FALSE,
-        CREATE_NEW_CONSOLE, NULL, NULL, &si, &pi))
-    {
-        PrintLastError(L"CreateProcess (atm)");
-        return FALSE;
-    }
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    return TRUE;
-}
-
-// Сервер почтового ящика - тот же приём опроса, что в листинге 17.3
-// книги: GetMailslotInfo подсказывает размер следующего сообщения и их
-// количество, ReadFile читает РОВНО одно сообщение за раз.
-DWORD WINAPI MailslotServerThread(LPVOID)
-{
-    for (;;)
-    {
-        if (WaitForSingleObject(g_hQuitEvent, 0) == WAIT_OBJECT_0)
-            break;
-
-        DWORD nextSize, count;
-        if (!GetMailslotInfo(g_hMailslot, NULL, &nextSize, &count, NULL))
-            break;   // дескриптор закрыт диспетчером при завершении - выходим тихо
-
-        while (count != 0 && nextSize != MAILSLOT_NO_MESSAGE)
+        if (record.EventType == KEY_EVENT) // Проверяет, является ли событие клавиатурным
         {
-            wchar_t* p = new wchar_t[nextSize / sizeof(wchar_t) + 1];
-            DWORD n;
-            if (ReadFile(g_hMailslot, p, nextSize, &n, NULL))
+            KEY_EVENT_RECORD key = record.Event.KeyEvent; // Получает данные события клавиатуры
+
+            if (key.bKeyDown) // Проверяет, что клавиша нажата, а не отпущена
             {
-                p[n / sizeof(wchar_t)] = L'\0';
-                Log(L"АТМ", p);
+                cout << "KEY: " // Выводит информацию о клавише
+                    << key.wVirtualKeyCode // Выводит виртуальный код клавиши
+                    << " CHAR: " // Выводит подпись символа
+                    << key.uChar.AsciiChar // Выводит ASCII-код символа
+                    << "\n"; // Переходит на новую строку
 
-                // Свой же формат сообщения "ATM<id>:текст" - разбираем,
-                // чтобы понять, какую клетку табло перекрасить и как.
-                if (p[0] == 'A' && p[1] == 'T' && p[2] == 'M')
+                if (key.uChar.AsciiChar == 'q' || // Проверяет нажатие маленькой q
+                    key.uChar.AsciiChar == 'Q') // Проверяет нажатие большой Q
                 {
-                    int id = _wtoi(p + 3);
-                    if (id >= 1 && id <= ATM_COUNT)
-                    {
-                        EnterCriticalSection(&g_csLog);
-                        lstrcpyn(g_atm[id - 1].lastMsg, p, _countof(g_atm[id - 1].lastMsg));
-                        int len = lstrlen(p);
-                        g_atm[id - 1].state = (len > 0 && p[len - 1] == '!') ? 2 : 1;
-                        DrawAtmCell(id - 1);
-                        LeaveCriticalSection(&g_csLog);
-                    }
-                }
-            }
-            delete[] p;
-
-            if (!GetMailslotInfo(g_hMailslot, NULL, &nextSize, &count, NULL))
-                break;
-        }
-
-        Sleep(150);   // не молотить GetMailslotInfo вхолостую между приходами сообщений
-    }
-
-    return 0;
-}
-
-// ============================================================================
-//  Роль диспетчера целиком (главы 9, 11, 12, 13 - console; 15, 16, 17 - IPC)
-// ============================================================================
-
-int RunDispatcherRole()
-{
-    InitializeCriticalSection(&g_csLog);
-
-    g_hQuitEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
-    if (g_hQuitEvent == NULL)
-    {
-        PrintLastError(L"CreateEvent");
-        return 1;
-    }
-
-    if (!SetupDispatcherConsole())
-        return 1;
-
-    ShowSplash();
-
-    for (int i = 0; i < ATM_COUNT; ++i)
-    {
-        g_atm[i].state = 0;
-        lstrcpy(g_atm[i].lastMsg, L"(нет данных)");
-    }
-
-    DrawDashboardChrome();
-    Log(L"ДИСПЕТЧЕР", L"дашборд поднят, запускаю каналы связи...");
-
-    if (!SpawnAgent())
-        Log(L"ДИСПЕТЧЕР", L"датчик нагрузки не запущен (см. код ошибки выше)");
-
-    if (!CreateAtmMailslot())
-        Log(L"ДИСПЕТЧЕР", L"почтовый ящик не создан");
-
-    DWORD  dwAgentTid, dwPipeTid, dwMailslotTid;
-    HANDLE hAgentThread = CreateThread(NULL, 0, AgentReaderThread, NULL, 0, &dwAgentTid);
-    HANDLE hPipeThread = CreateThread(NULL, 0, NamedPipeServerThread, NULL, 0, &dwPipeTid);
-    HANDLE hMailslotThread = CreateThread(NULL, 0, MailslotServerThread, NULL, 0, &dwMailslotTid);
-
-    if (hAgentThread == NULL || hPipeThread == NULL || hMailslotThread == NULL)
-        PrintLastError(L"CreateThread (один из потоков IPC)");
-
-    Sleep(300);   // дать потокам открыть каналы, прежде чем звать детей
-
-    int startX = 360;
-    for (int i = 0; i < ATM_COUNT; ++i)
-    {
-        SpawnAtm(i + 1, startX, 80);
-        startX += 340;
-        Sleep(80);
-    }
-
-    SpawnBranch();
-
-    // ---- главный цикл: низкоуровневый ввод консоли (главы 9, 13) ----
-    BOOL running = TRUE;
-    while (running)
-    {
-        DWORD wait = WaitForSingleObject(g_hStdIn, 500);
-        if (wait == WAIT_TIMEOUT)
-            continue;   // просто даём фоновым потокам время поработать
-        if (wait != WAIT_OBJECT_0)
+                    break; // Выходит из цикла обработки событий
+                } // Завершает проверку клавиши Q
+            } // Завершает проверку нажатия клавиши
+        } // Завершает обработку клавиатурного события
+        else if (record.EventType == MOUSE_EVENT) // Проверяет событие мыши
         {
-            PrintLastError(L"WaitForSingleObject (hStdIn)");
-            break;
-        }
+            MOUSE_EVENT_RECORD mouse = // Создает структуру для данных мыши
+                record.Event.MouseEvent; // Получает данные события мыши
 
-        INPUT_RECORD ir;
-        DWORD        nRead;
-        if (!ReadConsoleInput(g_hStdIn, &ir, 1, &nRead))
+            cout << "MOUSE: X=" // Выводит координату X мыши
+                << mouse.dwMousePosition.X // Получает координату X
+                << " Y=" // Выводит координату Y
+                << mouse.dwMousePosition.Y // Получает координату Y
+                << "\n"; // Переходит на новую строку
+        } // Завершает обработку события мыши
+        else if (record.EventType == WINDOW_BUFFER_SIZE_EVENT) // Проверяет изменение размера окна
         {
-            PrintLastError(L"ReadConsoleInput");
-            break;
-        }
+            cout << "WINDOW: " // Выводит информацию об изменении окна
+                << record.Event.WindowBufferSizeEvent.dwSize.X // Выводит новую ширину
+                << " x " // Выводит разделитель размеров
+                << record.Event.WindowBufferSizeEvent.dwSize.Y // Выводит новую высоту
+                << "\n"; // Переходит на новую строку
+        } // Завершает обработку события изменения размера
+    } // Завершает цикл обработки событий
 
-        switch (ir.EventType)
+    SetConsoleMode(hIn, oldMode); // Восстанавливает первоначальный режим консоли
+    system("cls"); // Очищает экран после выхода из мониторинга
+}
+
+void inputBuffer() // Функция демонстрации входного буфера
+{
+    DWORD count; // Переменная для количества событий во входном буфере
+    DWORD read; // Переменная для количества прочитанных событий
+    INPUT_RECORD record = {}; // Создает пустую структуру события
+
+    cout << "===== INPUT BUFFER =====\n\n"; // Выводит заголовок раздела
+
+    GetNumberOfConsoleInputEvents(hIn, &count); // Получает количество событий во входном буфере
+
+    cout << "Events: " // Выводит количество событий
+        << count << "\n"; // Показывает количество событий
+
+    PeekConsoleInput( // Просматривает событие без удаления его из буфера
+        hIn, // Дескриптор входной консоли
+        &record, // Адрес структуры для сохранения события
+        1, // Количество событий для просмотра
+        &read // Количество реально прочитанных событий
+    ); // Завершает вызов функции
+
+    cout << "PeekConsoleInput: " // Выводит результат просмотра
+        << (read ? "record found" : "buffer empty") // Показывает найдено событие или нет
+        << "\n"; // Переходит на новую строку
+
+    record.EventType = KEY_EVENT; // Устанавливает тип события — клавиатура
+    record.Event.KeyEvent.bKeyDown = TRUE; // Указывает, что клавиша нажата
+    record.Event.KeyEvent.wRepeatCount = 1; // Устанавливает количество повторений равным 1
+    record.Event.KeyEvent.wVirtualKeyCode = 'X'; // Устанавливает виртуальный код клавиши X
+    record.Event.KeyEvent.uChar.AsciiChar = 'X'; // Устанавливает ASCII-символ X
+
+    WriteConsoleInput( // Добавляет созданное событие во входной буфер
+        hIn, // Дескриптор входной консоли
+        &record, // Адрес создаваемого события
+        1, // Количество добавляемых событий
+        &read // Количество записанных событий
+    ); // Завершает вызов функции
+
+    GetNumberOfConsoleInputEvents( // Снова получает количество событий
+        hIn, // Дескриптор входной консоли
+        &count // Переменная для результата
+    ); // Завершает вызов функции
+
+    cout << "After WriteConsoleInput: " // Выводит результат после добавления события
+        << count << "\n"; // Показывает новое количество событий
+
+    FlushConsoleInputBuffer(hIn); // Полностью очищает входной буфер
+
+    GetNumberOfConsoleInputEvents( // Получает количество событий после очистки
+        hIn, // Дескриптор входной консоли
+        &count // Переменная для результата
+    ); // Завершает вызов функции
+
+    cout << "After Flush: " // Выводит результат очистки
+        << count << "\n"; // Показывает количество оставшихся событий
+
+    pauseProgram(); // Ожидает нажатия клавиши и очищает экран
+}
+
+void ioDemo() // Функция демонстрации высокого и низкого уровня I/O
+{
+    char text[100] = {}; // Создает буфер для введенного текста
+    DWORD read; // Переменная для количества прочитанных данных
+    DWORD written; // Переменная для количества записанных данных
+
+    cout << "===== HIGH AND LOW LEVEL I/O =====\n\n"; // Выводит заголовок раздела
+
+    const char* message = // Создает указатель на сообщение
+        "High-level: WriteConsole\n"; // Текст для высокоуровневого вывода
+
+    WriteConsoleA( // Выполняет высокоуровневую запись в консоль
+        hOut, // Дескриптор вывода
+        message, // Текст сообщения
+        static_cast<DWORD>(strlen(message)), // Определяет длину сообщения
+        &written, // Сохраняет количество записанных символов
+        NULL // Дополнительный параметр отсутствует
+    ); // Завершает вызов функции
+
+    cout << "Enter text: "; // Просит пользователя ввести текст
+
+    ReadConsoleA( // Выполняет высокоуровневое чтение из консоли
+        hIn, // Дескриптор входа
+        text, // Буфер для введенного текста
+        sizeof(text) - 1, // Максимальное количество символов
+        &read, // Сохраняет количество прочитанных символов
+        NULL // Дополнительный параметр отсутствует
+    ); // Завершает вызов функции
+
+    if (read > 0) // Проверяет, был ли введен текст
+        text[read - 1] = '\0'; // Удаляет символ Enter из конца строки
+
+    cout << "You entered: " // Выводит введенный текст
+        << text << "\n"; // Показывает содержимое буфера
+
+    HANDLE input = CreateFileA( // Создает дескриптор для консольного ввода
+        "CONIN$", // Специальное имя входа консоли
+        GENERIC_READ, // Разрешает чтение
+        FILE_SHARE_READ, // Разрешает совместное чтение
+        NULL, // Атрибуты безопасности отсутствуют
+        OPEN_EXISTING, // Открывает существующий объект
+        0, // Дополнительные флаги отсутствуют
+        NULL // Шаблон отсутствует
+    ); // Завершает создание входного дескриптора
+
+    HANDLE output = CreateFileA( // Создает дескриптор для консольного вывода
+        "CONOUT$", // Специальное имя выхода консоли
+        GENERIC_WRITE, // Разрешает запись
+        FILE_SHARE_WRITE, // Разрешает совместную запись
+        NULL, // Атрибуты безопасности отсутствуют
+        OPEN_EXISTING, // Открывает существующий объект
+        0, // Дополнительные флаги отсутствуют
+        NULL // Шаблон отсутствует
+    ); // Завершает создание выходного дескриптора
+
+    if (output != INVALID_HANDLE_VALUE) // Проверяет успешность открытия консольного вывода
+    {
+        const char* lowMessage = // Создает сообщение для низкоуровневого вывода
+            "Low-level: WriteFile -> CONOUT$\n"; // Текст сообщения
+
+        WriteFile( // Выполняет низкоуровневую запись
+            output, // Дескриптор выхода
+            lowMessage, // Текст сообщения
+            static_cast<DWORD>(strlen(lowMessage)), // Размер сообщения
+            &written, // Количество записанных данных
+            NULL // Дополнительный параметр отсутствует
+        ); // Завершает запись
+
+        CloseHandle(output); // Закрывает дескриптор выхода
+    } // Завершает проверку выходного дескриптора
+
+    if (input != INVALID_HANDLE_VALUE) // Проверяет успешность открытия консольного ввода
+    {
+        char key; // Переменная для одного символа
+
+        cout << "Press one key: "; // Просит пользователя нажать одну клавишу
+
+        ReadFile( // Выполняет низкоуровневое чтение
+            input, // Дескриптор входа
+            &key, // Адрес переменной для сохранения символа
+            1, // Читает один байт
+            &read, // Сохраняет количество прочитанных байт
+            NULL // Дополнительный параметр отсутствует
+        ); // Завершает чтение
+
+        cout << "\nReadFile received: " // Выводит полученный символ
+            << key << "\n"; // Показывает символ
+
+        CloseHandle(input); // Закрывает дескриптор входа
+    } // Завершает проверку входного дескриптора
+
+    pauseProgram(); // Ожидает нажатия клавиши и очищает экран
+}
+
+void newBuffer() // Функция создания нового экранного буфера
+{
+    HANDLE buffer; // Дескриптор нового экранного буфера
+    DWORD written; // Переменная для количества записанных символов
+
+    buffer = CreateConsoleScreenBuffer( // Создает новый экранный буфер
+        GENERIC_READ | GENERIC_WRITE, // Разрешает чтение и запись
+        0, // Совместный доступ отсутствует
+        NULL, // Атрибуты безопасности отсутствуют
+        CONSOLE_TEXTMODE_BUFFER, // Создает текстовый экранный буфер
+        NULL // Дополнительный параметр отсутствует
+    ); // Завершает создание буфера
+
+    if (buffer == INVALID_HANDLE_VALUE) // Проверяет, удалось ли создать буфер
+    {
+        cout << "Buffer creation failed.\n"; // Выводит сообщение об ошибке
+        pauseProgram(); // Ожидает нажатия клавиши
+        return; // Выходит из функции
+    } // Завершает проверку создания буфера
+
+    SetConsoleActiveScreenBuffer(buffer); // Делает новый буфер активным
+
+    const char* message = // Создает указатель на текст нового буфера
+        "===== NEW SCREEN BUFFER =====\n\n" // Первая строка сообщения
+        "This is another screen buffer.\n"; // Вторая строка сообщения
+
+    WriteConsoleA( // Записывает сообщение в новый экранный буфер
+        buffer, // Дескриптор нового буфера
+        message, // Текст сообщения
+        static_cast<DWORD>(strlen(message)), // Размер текста
+        &written, // Количество записанных символов
+        NULL // Дополнительный параметр отсутствует
+    ); // Завершает запись
+
+    Sleep(1500); // Показывает новый буфер в течение 1,5 секунды
+
+    SetConsoleActiveScreenBuffer(hOut); // Возвращает старый экранный буфер
+
+    CloseHandle(buffer); // Закрывает дескриптор нового буфера
+
+    pauseProgram(); // Ожидает нажатия клавиши и очищает экран
+}
+
+void windowControl() // Функция управления окном консоли
+{
+    char title[256]; // Массив для хранения заголовка окна
+    HWND window; // Переменная для дескриптора окна
+    COORD maxSize; // Переменная для максимального размера окна
+
+    GetConsoleTitleA( // Получает текущий заголовок консоли
+        title, // Буфер для сохранения заголовка
+        sizeof(title) // Максимальный размер буфера
+    ); // Завершает получение заголовка
+
+    window = GetConsoleWindow(); // Получает дескриптор окна консоли
+
+    maxSize = GetLargestConsoleWindowSize(hOut); // Получает максимальный размер окна
+
+    cout << "===== CONSOLE WINDOW =====\n\n"; // Выводит заголовок раздела
+
+    cout << "Title: " // Выводит название параметра
+        << title << "\n"; // Выводит текущий заголовок окна
+
+    cout << "Window handle: " // Выводит название параметра
+        << window << "\n"; // Выводит дескриптор окна
+
+    cout << "Largest size: " // Выводит максимальный размер
+        << maxSize.X << " x " << maxSize.Y << "\n"; // Выводит ширину и высоту
+
+    SetConsoleTitleA( // Изменяет заголовок окна консоли
+        "Win32 Console Control Center" // Новый заголовок
+    ); // Завершает изменение заголовка
+
+    cout << "\nConsole title changed.\n"; // Сообщает об изменении заголовка
+
+    pauseProgram(); // Ожидает нажатия клавиши и очищает экран
+}
+
+void modes() // Функция просмотра и изменения режимов консоли
+{
+    DWORD mode; // Переменная для хранения режима консоли
+
+    GetConsoleMode(hIn, &mode); // Получает текущий режим входной консоли
+
+    cout << "===== CONSOLE MODES =====\n\n"; // Выводит заголовок раздела
+
+    cout << "ENABLE_LINE_INPUT: " // Выводит название режима построчного ввода
+        << !!(mode & ENABLE_LINE_INPUT) // Проверяет включен ли режим
+        << "\n"; // Переходит на новую строку
+
+    cout << "ENABLE_ECHO_INPUT: " // Выводит название режима отображения ввода
+        << !!(mode & ENABLE_ECHO_INPUT) // Проверяет включен ли режим
+        << "\n"; // Переходит на новую строку
+
+    cout << "ENABLE_PROCESSED_INPUT: " // Выводит название режима обработки ввода
+        << !!(mode & ENABLE_PROCESSED_INPUT) // Проверяет включен ли режим
+        << "\n"; // Переходит на новую строку
+
+    cout << "ENABLE_MOUSE_INPUT: " // Выводит название режима мыши
+        << !!(mode & ENABLE_MOUSE_INPUT) // Проверяет включен ли ввод мыши
+        << "\n"; // Переходит на новую строку
+
+    cout << "ENABLE_WINDOW_INPUT: " // Выводит название режима изменения окна
+        << !!(mode & ENABLE_WINDOW_INPUT) // Проверяет включен ли режим окна
+        << "\n"; // Переходит на новую строку
+
+    SetConsoleMode( // Устанавливает новый режим консоли
+        hIn, // Дескриптор входной консоли
+        mode | ENABLE_MOUSE_INPUT // Сохраняет старые настройки и включает мышь
+    ); // Завершает установку режима
+
+    cout << "\nMouse input mode enabled.\n"; // Сообщает, что ввод мыши включен
+
+    pauseProgram(); // Ожидает нажатия клавиши и очищает экран
+
+    SetConsoleMode(hIn, mode); // Восстанавливает исходный режим консоли
+}
+
+void redirectOutput() // Функция перенаправления вывода в файл
+{
+    HANDLE oldOutput = // Создает переменную для старого дескриптора вывода
+        GetStdHandle(STD_OUTPUT_HANDLE); // Получает стандартный дескриптор вывода
+
+    HANDLE file = CreateFileA( // Создает файл для записи
+        "console_log.txt", // Имя создаваемого файла
+        GENERIC_WRITE, // Разрешает запись в файл
+        0, // Запрещает совместный доступ
+        NULL, // Атрибуты безопасности отсутствуют
+        CREATE_ALWAYS, // Создает файл заново или перезаписывает существующий
+        FILE_ATTRIBUTE_NORMAL, // Указывает обычный файл
+        NULL // Шаблон отсутствует
+    ); // Завершает создание файла
+
+    if (file == INVALID_HANDLE_VALUE) // Проверяет, удалось ли создать файл
+    {
+        cout << "File creation failed.\n"; // Выводит сообщение об ошибке
+        pauseProgram(); // Ожидает нажатия клавиши
+        return; // Выходит из функции
+    } // Завершает проверку файла
+
+    SetStdHandle( // Изменяет стандартный дескриптор вывода
+        STD_OUTPUT_HANDLE, // Указывает стандартный вывод
+        file // Вместо консоли устанавливает файл
+    ); // Завершает перенаправление вывода
+
+    const char* message = // Создает сообщение для записи
+        "Win32 Console Control Center\n" // Первая строка файла
+        "Output redirected by SetStdHandle.\n"; // Вторая строка файла
+
+    DWORD written; // Переменная для количества записанных байт
+
+    WriteFile( // Записывает сообщение в файл
+        file, // Дескриптор файла
+        message, // Текст сообщения
+        static_cast<DWORD>(strlen(message)), // Размер сообщения
+        &written, // Количество записанных байт
+        NULL // Дополнительный параметр отсутствует
+    ); // Завершает запись в файл
+
+    SetStdHandle( // Восстанавливает стандартный вывод
+        STD_OUTPUT_HANDLE, // Указывает стандартный вывод
+        oldOutput // Возвращает старый дескриптор консоли
+    ); // Завершает восстановление вывода
+
+    CloseHandle(file); // Закрывает дескриптор файла
+
+    cout << "Output saved to console_log.txt\n"; // Сообщает пользователю о сохранении файла
+
+    pauseProgram(); // Ожидает нажатия клавиши и очищает экран
+}
+
+int main() // Главная функция, с которой начинается выполнение программы
+{
+    hIn = GetStdHandle(STD_INPUT_HANDLE); // Получает стандартный дескриптор ввода
+    hOut = GetStdHandle(STD_OUTPUT_HANDLE); // Получает стандартный дескриптор вывода
+
+    SetConsoleTitleA( // Устанавливает название окна консоли
+        "Win32 Console Control Center" // Текст заголовка
+    ); // Завершает установку заголовка
+
+    while (true) // Запускает бесконечный цикл главного меню
+    {
+        SetConsoleTextAttribute(hOut, 15); // Устанавливает белый цвет текста
+
+        cout << "========================================\n"; // Выводит верхнюю границу меню
+        cout << "       WIN32 CONSOLE CONTROL CENTER     \n"; // Выводит название программы
+        cout << "========================================\n"; // Выводит границу под названием
+        cout << "1. System Information\n"; // Пункт 1 — информация о системе
+        cout << "2. Cursor Control\n"; // Пункт 2 — управление курсором
+        cout << "3. Colors and Attributes\n"; // Пункт 3 — цвета и атрибуты
+        cout << "4. Screen Output\n"; // Пункт 4 — экранный буфер
+        cout << "5. CHAR_INFO\n"; // Пункт 5 — структура CHAR_INFO
+        cout << "6. Keyboard and Mouse Events\n"; // Пункт 6 — события клавиатуры и мыши
+        cout << "7. Input Buffer\n"; // Пункт 7 — входной буфер
+        cout << "8. High and Low Level I/O\n"; // Пункт 8 — высокий и низкий уровень I/O
+        cout << "9. New Screen Buffer\n"; // Пункт 9 — новый экранный буфер
+        cout << "A. Console Window\n"; // Пункт A — управление окном
+        cout << "B. Console Modes\n"; // Пункт B — режимы консоли
+        cout << "C. Redirect Output\n"; // Пункт C — перенаправление вывода
+        cout << "0. Exit\n"; // Пункт 0 — выход из программы
+        cout << "========================================\n"; // Выводит нижнюю границу меню
+        cout << "Select: "; // Просит пользователя выбрать пункт
+
+        char choice; // Создает переменную для выбора пользователя
+        cin >> choice; // Считывает выбранный символ
+
+        system("cls"); // Очищает экран перед выполнением выбранного пункта
+
+        switch (choice) // Проверяет выбранный пользователем пункт
         {
-        case KEY_EVENT:
-            if (ir.Event.KeyEvent.bKeyDown)
-            {
-                wchar_t ch = ir.Event.KeyEvent.uChar.UnicodeChar;
-                if (ch == 'q' || ch == 'Q')
-                {
-                    running = FALSE;
-                }
-                else if (ch == 'c' || ch == 'C')
-                {
-                    EnterCriticalSection(&g_csLog);
-                    COORD c;
-                    c.X = 0; c.Y = (SHORT)LOG_TOP;
-                    DWORD written;
-                    FillConsoleOutputCharacter(g_hStdOut, ' ',
-                        BUF_COLS * (LOG_BOTTOM - LOG_TOP + 1), c, &written);
-                    g_logRow = LOG_TOP;
-                    LeaveCriticalSection(&g_csLog);
-                    Log(L"ДИСПЕТЧЕР", L"журнал очищен оператором");
-                }
-            }
-            break;
+        case '1': // Если пользователь выбрал 1
+            info(); // Вызывает функцию информации о системе
+            break; // Завершает эту ветку switch
 
-        case MOUSE_EVENT:
-            if ((ir.Event.MouseEvent.dwButtonState & FROM_LEFT_1ST_BUTTON_PRESSED) &&
-                ir.Event.MouseEvent.dwEventFlags == 0 &&
-                ir.Event.MouseEvent.dwMousePosition.Y == ROW_BOARD)
-            {
-                int idx = ir.Event.MouseEvent.dwMousePosition.X / CELL_WIDTH;
-                if (idx >= 0 && idx < ATM_COUNT)
-                    Log(L"ТАБЛО", g_atm[idx].lastMsg);
-            }
-            break;
+        case '2': // Если пользователь выбрал 2
+            cursorControl(); // Вызывает функцию управления курсором
+            break; // Завершает эту ветку switch
 
-        case WINDOW_BUFFER_SIZE_EVENT:
-            Log(L"СИСТЕМА", L"окно консоли изменило размер");
-            break;
+        case '3': // Если пользователь выбрал 3
+            colors(); // Вызывает функцию цветов и атрибутов
+            break; // Завершает эту ветку switch
 
-        case FOCUS_EVENT:
-        case MENU_EVENT:
-            break;   // игнорируем - глава 9 явно отмечает, что это ответственность системы
+        case '4': // Если пользователь выбрал 4
+            screenOutput(); // Вызывает функцию работы с экранным буфером
+            break; // Завершает эту ветку switch
 
-        default:
-            Log(L"СИСТЕМА", L"неизвестный тип события ввода");
-            break;
+        case '5': // Если пользователь выбрал 5
+            charInfoDemo(); // Вызывает демонстрацию CHAR_INFO
+            break; // Завершает эту ветку switch
+
+        case '6': // Если пользователь выбрал 6
+            events(); // Вызывает мониторинг событий
+            break; // Завершает эту ветку switch
+
+        case '7': // Если пользователь выбрал 7
+            inputBuffer(); // Вызывает работу с входным буфером
+            break; // Завершает эту ветку switch
+
+        case '8': // Если пользователь выбрал 8
+            ioDemo(); // Вызывает демонстрацию высокого и низкого I/O
+            break; // Завершает эту ветку switch
+
+        case '9': // Если пользователь выбрал 9
+            newBuffer(); // Создает и демонстрирует новый экранный буфер
+            break; // Завершает эту ветку switch
+
+        case 'A': // Если пользователь выбрал большую букву A
+        case 'a': // Если пользователь выбрал маленькую букву a
+            windowControl(); // Вызывает управление окном консоли
+            break; // Завершает эту ветку switch
+
+        case 'B': // Если пользователь выбрал большую букву B
+        case 'b': // Если пользователь выбрал маленькую букву b
+            modes(); // Вызывает функцию управления режимами консоли
+            break; // Завершает эту ветку switch
+
+        case 'C': // Если пользователь выбрал большую букву C
+        case 'c': // Если пользователь выбрал маленькую букву c
+            redirectOutput(); // Вызывает функцию перенаправления вывода
+            break; // Завершает эту ветку switch
+
+        case '0': // Если пользователь выбрал 0
+            SetConsoleTextAttribute(hOut, 7); // Возвращает стандартный цвет консоли
+            return 0; // Завершает программу с кодом успешного выполнения
+
+        default: // Если пользователь ввел неизвестную команду
+            cout << "Unknown command.\n"; // Выводит сообщение об ошибке
+            pauseProgram(); // Ожидает клавишу и очищает экран
         }
     }
-
-    Log(L"ДИСПЕТЧЕР", L"получена команда закрытия, останавливаю каналы...");
-    SetEvent(g_hQuitEvent);
-
-    // NamedPipeServerThread и MailslotServerThread сами замечают
-    // g_hQuitEvent между операциями (мэйлслот - раз в ~150мс через свой
-    // опрос; именованный канал к этому моменту уже отработал одно
-    // соединение и вышел). AgentReaderThread - другой случай: он стоит в
-    // БЕЗУСЛОВНОМ блокирующем ReadFile и может законно ждать agent'а ещё
-    // несколько секунд, а событие внутри цикла не проверяет. Единственный
-    // доступный способ прервать это ожидание - CancelSynchronousIo: она
-    // заставляет заблокированный синхронный ReadFile/ConnectNamedPipe
-    // этого потока вернуть ошибку ERROR_OPERATION_ABORTED, после чего
-    // поток выходит из цикла. Функция не описана в главах 9-17 книги
-    // (общее знание Win32, Vista и новее), поэтому помечена отдельно.
-    // Закрывать дескриптор канала, пока поток в нём заблокирован, нельзя -
-    // CloseHandle может повиснуть вместе с ним.
-    CancelSynchronousIo(hAgentThread);   // выводит поток из ReadFile (Vista+), иначе CloseHandle ниже может повиснуть
-    CancelSynchronousIo(hPipeThread);    // то же для ConnectNamedPipe, если отделение не успело подключиться
-    CloseHandle(g_hAgentRead);
-
-    // Таймаут 3000, не INFINITE: если оператор нажал Q ДО того, как
-    // branch успел подключиться, NamedPipeServerThread всё ещё стоит в
-    // ConnectNamedPipe (у синхронного вызова нет параметра таймаута) - в
-    // этом редком случае ждать его вечно смысла нет, программа всё равно
-    // корректно завершится, просто этот один поток не присоединится
-    // явно (ОС снимает все потоки при выходе из main() в любом случае).
-    HANDLE waitThese[3];
-    waitThese[0] = hAgentThread;
-    waitThese[1] = hPipeThread;
-    waitThese[2] = hMailslotThread;
-    WaitForMultipleObjects(3, waitThese, TRUE, 3000);
-
-    CloseHandle(g_hMailslot);   // поток уже вышел сам (см. комментарий выше), закрываем следом
-    CloseHandle(hAgentThread);
-    CloseHandle(hPipeThread);
-    CloseHandle(hMailslotThread);
-    CloseHandle(g_hQuitEvent);
-    DeleteCriticalSection(&g_csLog);
-
-    SetConsoleTextAttribute(g_hStdOut, FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE);
-    wcout << endl << L"Диспетчерская закрыта. До связи." << endl;
-
-    return 0;
-}
-
-// ============================================================================
-//  Роль отделения - клиент именованного канала (глава 16)
-// ============================================================================
-
-int RunBranchRole()
-{
-    // Клиент на этом же компьютере открывает канал через "." - значит
-    // получает поток, а не сообщения (глава 16, "режим сообщений на
-    // клиенте"): для сообщений нужно полное имя компьютера. Здесь и
-    // потока достаточно, потому что в этом обмене ровно одно сообщение
-    // в каждую сторону подряд.
-    if (!WaitNamedPipe(BRANCH_PIPE_NAME, 5000))
-    {
-        wcout << L"Отделение: WaitNamedPipe failed, диспетчер не отвечает, код "
-            << GetLastError() << endl;
-        return GetLastError();
-    }
-
-    HANDLE h = CreateFile(BRANCH_PIPE_NAME, GENERIC_READ | GENERIC_WRITE,
-        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
-        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE)
-    {
-        wcout << L"Отделение: CreateFile failed, код " << GetLastError() << endl;
-        return GetLastError();
-    }
-
-    wchar_t  report[] = L"Отделение №2: смена закрыта, касса сходится, тревог не было.";
-    DWORD n;
-    if (!WriteFile(h, report, (lstrlen(report) + 1) * sizeof(wchar_t), &n, NULL))
-    {
-        wcout << L"Отделение: WriteFile failed, код " << GetLastError() << endl;
-        CloseHandle(h);
-        return GetLastError();
-    }
-    wcout << L"Отделение: отчёт отправлен диспетчеру." << endl;
-
-    // PeekNamedPipe - смотрим, сколько байт ответа уже пришло, НЕ забирая
-    // их из канала (глава 16), прежде чем читать по-настоящему.
-    Sleep(150);   // дать диспетчеру время ответить
-    DWORD avail = 0;
-    if (PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL))
-        wcout << L"Отделение: в канале уже " << avail << L" байт ответа." << endl;
-
-    wchar_t buf[256];
-    if (ReadFile(h, buf, sizeof(buf) - sizeof(wchar_t), &n, NULL))
-    {
-        buf[n / sizeof(wchar_t)] = L'\0';
-        wcout << L"Отделение: получен ответ - " << buf << endl;
-    }
-    else
-    {
-        wcout << L"Отделение: ReadFile (ответ) failed, код " << GetLastError() << endl;
-    }
-
-    CloseHandle(h);
-    return 0;
-}
-
-// ============================================================================
-//  Роль банкомата - клиент почтового ящика (глава 17)
-// ============================================================================
-
-int RunAtmRole(int id)
-{
-    HANDLE hStdOut = GetStdHandle(STD_OUTPUT_HANDLE);
-    SetConsoleTextAttribute(hStdOut, FOREGROUND_GREEN | FOREGROUND_INTENSITY);
-
-    wcout << L"Банкомат #" << id << L" запущен, отправляю сигналы в диспетчерскую..." << endl;
-
-    HANDLE h = CreateFile(ATM_MAILSLOT_NAME, GENERIC_WRITE, FILE_SHARE_READ,
-        NULL, OPEN_EXISTING, 0, NULL);
-    if (h == INVALID_HANDLE_VALUE)
-    {
-        wcout << L"Банкомат #" << id << L": CreateFile (mailslot) failed, код "
-            << GetLastError() << endl;
-        return GetLastError();
-    }
-
-    // Третье сообщение - тревожное (кончается на '!'), диспетчер по этому
-    // же признаку красит клетку табло красным - см. MailslotServerThread.
-    const wchar_t* events[3];
-    events[0] = L"статус: в норме";
-    events[1] = L"выдана купюрная лента";
-    events[2] = L"низкий остаток кассет!";
-
-    for (int i = 0; i < 3; ++i)
-    {
-        wchar_t msg[80];
-        wsprintf(msg, L"ATM%d:%s", id, events[i]);
-
-        DWORD n;
-        if (!WriteFile(h, msg, (lstrlen(msg) + 1) * sizeof(wchar_t), &n, NULL))
-        {
-            wcout << L"Банкомат #" << id << L": WriteFile failed, код " << GetLastError() << endl;
-            break;
-        }
-        wcout << L"Банкомат #" << id << L": отправлено - " << events[i] << endl;
-        Sleep(400 + id * 100);
-    }
-
-    CloseHandle(h);
-    wcout << L"Банкомат #" << id << L": сеанс окончен." << endl;
-    Sleep(2500);   // окно видно ещё немного, прежде чем закроется вместе с процессом
-    return 0;
-}
-
-// ============================================================================
-//  Роль датчика нагрузки - клиент анонимного канала (глава 15)
-//  DETACHED_PROCESS: своей консоли нет и не будет, поэтому здесь нет ни
-//  одного wcout - только работа с каналом и тихий выход.
-// ============================================================================
-
-void RunAgentRole(HANDLE hWrite)
-{
-    SensorReading r;
-
-    for (int i = 0; i < AGENT_READINGS; ++i)
-    {
-        r.load = 10 + (GetTickCount() % 85);   // условная нагрузка, 10-94%
-        r.tick = GetTickCount();
-
-        DWORD n;
-        if (!WriteFile(hWrite, &r, sizeof(r), &n, NULL))
-            break;   // диспетчер закрыл канал (завершается) - тихо выходим
-
-        Sleep(500);
-    }
-
-    CloseHandle(hWrite);
-}
-
-// ============================================================================
-//  main() - выбор роли по argv[1] (одна программа - четыре роли)
-// ============================================================================
-
-int wmain(int argc, wchar_t* argv[])
-{
-    BuildExePath();
-    _setmode(_fileno(stdout), _O_U16TEXT);   // wcout с кириллицей в консоль
-    if (argc >= 3 && lstrcmpi(argv[1], L"agent") == 0)
-    {
-        HANDLE hWrite = (HANDLE)(INT_PTR)_wtoi(argv[2]);
-        RunAgentRole(hWrite);
-        return 0;
-    }
-
-    if (argc >= 2 && lstrcmpi(argv[1], L"branch") == 0)
-        return RunBranchRole();
-
-    if (argc >= 3 && lstrcmpi(argv[1], L"atm") == 0)
-        return RunAtmRole(_wtoi(argv[2]));
-
-    return RunDispatcherRole();
 }
