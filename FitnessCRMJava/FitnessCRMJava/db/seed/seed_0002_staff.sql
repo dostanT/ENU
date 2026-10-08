@@ -11,11 +11,6 @@
 USE FitnessCRM;
 GO
 
--- На случай повторного запуска — чистим и начинаем заново.
-DELETE FROM dbo.staff;
-DBCC CHECKIDENT ('dbo.staff', RESEED, 0) WITH NO_INFOMSGS;
-GO
-
 INSERT INTO dbo.staff (username, password_hash, full_name, role, branch_id, is_active) VALUES
  ('director',    '$2a$10$Z.zbDzZQJonE3UWEYONoceuRrUPl1DDeXqeYXPWs3w5.Ni0w7M7Hu', N'Смагулов Асет Болатович',   'DIRECTOR',    NULL, 1),
  ('manager01',   '$2a$10$Z.zbDzZQJonE3UWEYONoceuRrUPl1DDeXqeYXPWs3w5.Ni0w7M7Hu', N'Иванова Ольга Петровна',   'MANAGER',     1,    1),
